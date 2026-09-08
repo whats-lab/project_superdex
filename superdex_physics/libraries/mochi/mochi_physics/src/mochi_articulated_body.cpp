@@ -1853,9 +1853,17 @@ template <TimeStep kStep, bool kForceUseAllNodes>
 void articulated::compound::ResolveSkinning(
     CArticulatedLinkTransforms<kStep> const& linkTransforms,
     CArticulatedSkinningData const& skinningData,
+    CShape const& skinShape,
+    CRootTransform const& rootTransform,
     CActiveUniqueNodes const* activeNodes,
     CDisplacementSlice<real, kStep, DisplacementLayer::Skinned>& outDisplacements) {
   MOCHI_PROFILE_SCOPE();
+  // Contact and mesh queries apply the actor root to local positions. Skinning uses world-space
+  // bones, so remove that root once; blended skins still need world-space intermediate positions.
+  bool const convertToRootLocal =
+      !skinShape.shape->GetMeshBlending() && rootTransform.worldFromLocal != TransformRT{};
+  TransformRT const rootFromWorld =
+      convertToRootLocal ? Invert(rootTransform.worldFromLocal) : TransformRT{};
   if (activeNodes && !kForceUseAllNodes) {
     auto rest3 = Unflatten<Real3 const>(MakeConstSpan(skinningData.restCoords));
     auto disp3 = Unflatten<Real3>(MakeSpan(outDisplacements.value));
@@ -1863,11 +1871,20 @@ void articulated::compound::ResolveSkinning(
     skinningData.skinningTransform.Transform(
         linkTransforms, skinningData.restCoords, outDisplacements.value, activeNodeSpan);
     for (int iNode : activeNodeSpan) {
+      if (convertToRootLocal) {
+        disp3[iNode] = rootFromWorld.TransformPoint(disp3[iNode]);
+      }
       disp3[iNode] -= rest3[iNode];
     }
   } else {
     skinningData.skinningTransform.Transform(
         linkTransforms, skinningData.restCoords, outDisplacements.value);
+    if (convertToRootLocal) {
+      auto positions = Unflatten<Real3>(MakeSpan(outDisplacements.value));
+      for (int iNode = 0; iNode < positions.size(); ++iNode) {
+        positions[iNode] = rootFromWorld.TransformPoint(positions[iNode]);
+      }
+    }
     outDisplacements.value -= skinningData.restCoords;
   }
 }
@@ -1877,6 +1894,8 @@ void articulated::compound::ResolveSkinning(
   template void articulated::compound::ResolveSkinning<StepT>( \
       CArticulatedLinkTransforms<StepT> const& linkTransforms, \
       CArticulatedSkinningData const& skinningData,            \
+      CShape const& skinShape,                               \
+      CRootTransform const& rootTransform,                   \
       CActiveUniqueNodes const* activeNodes,                   \
       CDisplacementSlice<real, StepT, DisplacementLayer::Skinned>& outDisplacements);
 MOCHI_SPECIALIZE_RESOLVE_SKINNING(TimeStep::Current);

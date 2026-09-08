@@ -434,6 +434,8 @@ template <TimeStep kStep, bool kForceUseAllNodes = false>
 void ResolveSkinning(
     CArticulatedLinkTransforms<kStep> const& linkTransforms,
     CArticulatedSkinningData const& skinningData,
+    CShape const& skinShape,
+    CRootTransform const& rootTransform,
     CActiveUniqueNodes const* activeNodes,
     CDisplacementSlice<real, kStep, DisplacementLayer::Skinned>& outDisplacements);
 

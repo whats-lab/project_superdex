@@ -155,6 +155,10 @@ static void UpdatePotentialColliders(
           AnyShape worldBoundsCollider = TransformShape(
               worldFromCollider,
               ExpandColliderBoundsForContact(boundsCollider.localShape, paramsCollider));
+          // Include the point-cloud support radius before rejecting separated surfaces.
+          if (auto const* pointCloud = reg.try_get<CPointCloudColliderParams>(collider)) {
+            worldBoundsCollider = ExpandShape(worldBoundsCollider, pointCloud->radius);
+          }
 
           // Check for overlap
           if (HasOverlap(worldBoundsColliding, worldBoundsCollider)) {
@@ -196,6 +200,10 @@ static void UpdatePotentialColliders(
       AnyShape worldBoundsCollider = TransformShape(
           worldFromCollider,
           ExpandColliderBoundsForContact(boundsCollider.localShape, paramsCollider));
+      // Include the point-cloud support radius before rejecting separated surfaces.
+      if (auto const* pointCloud = reg.try_get<CPointCloudColliderParams>(collider)) {
+        worldBoundsCollider = ExpandShape(worldBoundsCollider, pointCloud->radius);
+          }
 
       // Check for overlap
       if (HasOverlap(worldBoundsColliding, worldBoundsCollider)) {
@@ -654,17 +662,18 @@ static void DistributeContactDetectionResultToPartitions(
   ContactDetectionResult& sourceResult = *resultPerCollider[0];
 
   // Set up data that is shared by all partitions
-  MOCHI_ASSERT_VERBOSE(
-      sourceResult.jacColliderFromWorld.size() == 1, "Deformable colliders are not supported");
-  MOCHI_ASSERT_VERBOSE(
-      sourceResult.jacColliderFromWorldStageStart.empty() ||
-          (explicitNormals && (sourceResult.jacColliderFromWorldStageStart.size() == 1)),
-      "Unexpected size");
+  // Rigid and point-cloud frame transforms are shared; mapped colliders may store one per point.
+  bool const perPointFrame = sourceResult.jacColliderFromWorld.size() > 1;
+  bool const perPointStageFrame = sourceResult.jacColliderFromWorldStageStart.size() > 1;
   for (int p = 1; p < isize(resultPerCollider); p++) {
     resultPerCollider[p]->isSdfGradUnitary = sourceResult.isSdfGradUnitary;
-    resultPerCollider[p]->jacColliderFromWorld.resize_noinit(1);
-    resultPerCollider[p]->jacColliderFromWorld[0] = sourceResult.jacColliderFromWorld[0];
-    if (kTimeStep == TimeStep::Current && explicitNormals) {
+    resultPerCollider[p]->ndofs = sourceResult.ndofs;
+    if (sourceResult.jacColliderFromWorld.size() == 1) {
+      resultPerCollider[p]->jacColliderFromWorld.resize_noinit(1);
+      resultPerCollider[p]->jacColliderFromWorld[0] = sourceResult.jacColliderFromWorld[0];
+    }
+    if (kTimeStep == TimeStep::Current && explicitNormals &&
+        sourceResult.jacColliderFromWorldStageStart.size() == 1) {
       resultPerCollider[p]->jacColliderFromWorldStageStart.resize_noinit(1);
       resultPerCollider[p]->jacColliderFromWorldStageStart[0] =
           sourceResult.jacColliderFromWorldStageStart[0];
@@ -676,6 +685,22 @@ static void DistributeContactDetectionResultToPartitions(
   for (int i = 0; i < isize(sourceResult.sampleIndices); ++i) {
     int const sampleIdx = sourceResult.sampleIndices[i];
     int const partitionIdx = collisionPartitions.SampleIdxToPartitionIdx(sampleIdx);
+
+    // Keep collider feature IDs, quadrature weights and Jacobians aligned with each contact.
+    // A skinned actor may have many partitions; omitting these arrays corrupts shell response.
+    auto distributeOptional = [&](auto& source, auto& target) {
+      if (source.empty()) return;
+      if (partitionIdx == 0) source[firstPartitionCount] = source[i];
+      else target.push_back(source[i]);
+    };
+    auto& targetResult = *resultPerCollider[partitionIdx];
+    distributeOptional(sourceResult.jacWorldFromDofs, targetResult.jacWorldFromDofs);
+    distributeOptional(sourceResult.colliderIntegrationWeights, targetResult.colliderIntegrationWeights);
+    distributeOptional(sourceResult.colliderFeatureIndices, targetResult.colliderFeatureIndices);
+    if (perPointFrame)
+      distributeOptional(sourceResult.jacColliderFromWorld, targetResult.jacColliderFromWorld);
+    if (perPointStageFrame)
+      distributeOptional(sourceResult.jacColliderFromWorldStageStart, targetResult.jacColliderFromWorldStageStart);
 
     if (partitionIdx == 0) {
       // Move the point to the consolidated section at the beginning.
@@ -719,6 +744,12 @@ static void DistributeContactDetectionResultToPartitions(
   sourceResult.sampleIndices.resize(firstPartitionCount);
   sourceResult.posColliding.resize(firstPartitionCount);
   sourceResult.sdfInfo.resize(firstPartitionCount);
+  // Trim optional per-contact arrays after partition zero has been compacted in place.
+  if (!sourceResult.jacWorldFromDofs.empty()) sourceResult.jacWorldFromDofs.resize(firstPartitionCount);
+  if (!sourceResult.colliderIntegrationWeights.empty()) sourceResult.colliderIntegrationWeights.resize(firstPartitionCount);
+  if (!sourceResult.colliderFeatureIndices.empty()) sourceResult.colliderFeatureIndices.resize(firstPartitionCount);
+  if (perPointFrame) sourceResult.jacColliderFromWorld.resize(firstPartitionCount);
+  if (perPointStageFrame) sourceResult.jacColliderFromWorldStageStart.resize(firstPartitionCount);
   if constexpr (kTimeStep == TimeStep::Current) {
     sourceResult.posCollidingStageStart.resize(firstPartitionCount);
     if (explicitNormals) {
@@ -919,6 +950,10 @@ static void DetectCollisionsWithSingleCollider(
       reg.get<CBoundingVolumeFor<kContactType, kTimeStep> const>(collider).localShape;
   AnyShape expandedColliderBounds =
       ExpandColliderBoundsForContact(colliderBounds, colliderContactParams);
+  // Sample culling must include the same support radius as point-cloud detection.
+  if (auto const* pointCloud = reg.try_get<CPointCloudColliderParams>(collider)) {
+    expandedColliderBounds = ExpandShape(expandedColliderBounds, pointCloud->radius);
+  }
   auto collidingFromCollider = Invert(worldFromColliding) * worldFromCollider;
 
   // List of sample points to be tested.
@@ -3224,8 +3259,18 @@ static void AssembleAllSyncContactPairs(
   // Start by enumerating the contacting pairs and their ContactJacs
   DynamicArray<ContactJac const*> allJacs;
   DynamicArray<ContactPair> allPairs(filoAllocator);
-  allJacs.reserve(2 * JacData::kMaxJacs * isize(actors) * isize(actors)); // worst case
-  allPairs.reserve(isize(actors) * isize(actors)); // worst case
+  // A skinned actor contributes one pair per contact partition, not just per actor.
+  // Reserve the exact count: growing this FILO-backed array frees an older allocation
+  // after a newer one and invalidates the new storage.
+  size_t pairCount = 0;
+  for (auto entity : actors) {
+    if (auto const* collisions =
+            regActiveColls.try_get<CActiveCollisions<ContactType::Sync, TimeStep::Current>>(entity)) {
+      pairCount += collisions->size();
+    }
+  }
+  allJacs.reserve(2 * JacData::kMaxJacs * pairCount);
+  allPairs.reserve(pairCount);
   for (auto entity0 : actors) {
     if (auto* activeCollisions =
             regActiveColls.try_get<CActiveCollisions<ContactType::Sync, TimeStep::Current>>(
@@ -3325,7 +3370,10 @@ static void AssembleAllSyncContactPairs(
       double const taskRemainingCost = targetCostPerTask - currentTaskWork.cost;
       int const numPointsToAdd =
           Min(static_cast<int>(Ceil(taskRemainingCost / cp.costPerPoint)), pointsRemaining.Size());
-      MOCHI_ASSERT(numPointsToAdd > 0 && numPointsToAdd <= pointsRemaining.Size());
+      MOCHI_ASSERT(numPointsToAdd > 0 && numPointsToAdd <= pointsRemaining.Size(),
+          "points=%d remaining=%d pairCost=%g total=%g targetTasks=%d targetCost=%g currentCost=%g",
+          numPointsToAdd, pointsRemaining.Size(), cp.costPerPoint, totalCost, numTargetTasks,
+          targetCostPerTask, currentTaskWork.cost);
       Interval<int> subRange{pointsRemaining.Min(), pointsRemaining.Min() + numPointsToAdd};
       currentTaskWork.pairWork.emplace_back(&cp, subRange);
       currentTaskWork.cost += numPointsToAdd * cp.costPerPoint;
@@ -3957,10 +4005,9 @@ void mochi::contact::UpdateConservativePotentialColliders(entt::registry& reg) {
               entt::exclude_t<TagStaticActor>())
            .each()) {
     auto const* cinfo = reg.try_get<CColliderInfo>(e);
-    // NOTE: Point-cloud colliders are excluded here, since they only collide with each other (and
-    // potentially themselves). Their conservative potential colliders are updated separately.
-    bool hasCollider =
-        cinfo && (cinfo->type != ColliderType::None) && (cinfo->type != ColliderType::PointCloud);
+    // Point clouds also receive contact from rigid, volumetric and skinned surfaces.
+    // Point-cloud pairs themselves are still registered separately below.
+    bool hasCollider = cinfo && (cinfo->type != ColliderType::None);
     dynamicEntities.push_back(e);
     dynamicBounds.push_back(bounds.worldAabb);
     dynamicHasCollider.push_back(hasCollider ? 1 : 0);
@@ -3999,6 +4046,12 @@ void mochi::contact::UpdateConservativePotentialColliders(entt::registry& reg) {
         entt::entity je = dynamicEntities[j];
         ContactLayerId jLayer = reg.get<CContactLayer>(je).id;
 
+        // The dedicated point-cloud pass handles these pairs once, including self contact.
+        if (reg.all_of<TagUsePointCloudContact>(ie) &&
+            reg.all_of<TagUsePointCloudContact>(je)) {
+          continue;
+        }
+
         // Consider i-vs-j
         if (iUseContact && dynamicHasCollider[j]) {
           if (contactTable.IsContactEnabled(ie, je, iLayer, jLayer)) {
@@ -4021,9 +4074,8 @@ void mochi::contact::UpdateConservativePotentialColliders(entt::registry& reg) {
   // All point-cloud colliders with overlapping conservative step bounds are potential colliders
   // with each other (including themselves, if self-contact is active), and point-cloud colliders
   // with overlapping conservative step bounds must be grouped into the same island. Additionally,
-  // point-cloud colliders cannot be colliders for any other type of actor. These potential collider
-  // relationships are excluded from the above process and added separately here, to enforce the
-  // specialized logic for point-cloud collisions.
+  // these pairs are excluded from the above process and added separately here to preserve
+  // the self-contact rules without registering duplicate interactions.
   reg.view<TagUsePointCloudContact const, CConservativeStepBounds const>().each(
       [&](entt::entity collidingEntity, CConservativeStepBounds const& collidingStepBounds) {
         auto const& collidingLayer = reg.get<CContactLayer>(collidingEntity);

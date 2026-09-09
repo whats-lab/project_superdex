@@ -307,9 +307,9 @@ void mochi::shell::EntityPostStage(
   // of the displacements at the beginning and at the end of the stage.
   currVel.value = (currDispl.value - stageStartDispl.value) * (1_r / intState.dtStage);
 
-  // If the solver diverged, reset the displacements and velocities to zero.
+  // Reject a diverged solution without teleporting the shell to its rest configuration.
   if (convergence.stageStatus == ConvergenceStatus::Diverged) {
-    currDispl.value.SetZero();
+    currDispl.value = stageStartDispl.value;
     currVel.value.SetZero();
   }
 

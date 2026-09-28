@@ -169,10 +169,12 @@ static void AssembleRigidBodyAsyncContactResponse(
     // In local frame, sk(r) = rot * sk(jVec) * rotT, so each block reduces to
     // R * (local sandwich) * R^T, which we accumulate per sample and apply once after the loop.
 
-    // Fetch the collider's world-from-local rotation and precompute the actor COM in the collider's
-    // local frame.
-    auto const& colliderTransform =
-        reg.get<CRootTransform const>(collision.colliderEntity).worldFromLocalPrev;
+    // Match the contact sample's time frame. A moving static collider has different current and
+    // stage-start transforms; mixing them offsets the lever arm and creates a false normal torque.
+    auto const& colliderRoot = reg.get<CRootTransform const>(collision.colliderEntity);
+    auto const& colliderTransform = GetTimeStep<kGradTarget>() == TimeStep::Current
+        ? colliderRoot.worldFromLocal
+        : colliderRoot.worldFromLocalPrev;
     auto const trans = colliderTransform.VGetTranslation();
     auto const [rot, rotT] = ToVMatrix3x3_WithTranspose(colliderTransform.GetRotation());
     auto const comColliderSpace = DotVecMat3x3(com - trans, rot);

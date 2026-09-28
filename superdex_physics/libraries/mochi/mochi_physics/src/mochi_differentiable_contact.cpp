@@ -107,9 +107,12 @@ static void AccumulateAsyncContactForceAdjoints(
     }
 
     // Accumulation of gradient terms for all contact points.
-    // The implementation matches AssembleRigidBodyAsyncContactResponse.
-    auto const& colliderTransform =
-        reg.get<CRootTransform const>(collision.colliderEntity).worldFromLocalPrev;
+    // Match the sample's time frame, as in AssembleRigidBodyAsyncContactResponse, so moving
+    // static colliders do not offset the lever arm in the contact-force derivative either.
+    auto const& colliderRoot = reg.get<CRootTransform const>(collision.colliderEntity);
+    auto const& colliderTransform = GetTimeStep<kGradTarget>() == TimeStep::Current
+        ? colliderRoot.worldFromLocal
+        : colliderRoot.worldFromLocalPrev;
     auto const trans = colliderTransform.VGetTranslation();
     auto const [rot, rotT] = ToVMatrix3x3_WithTranspose(colliderTransform.GetRotation());
     auto const comColliderSpace = DotVecMat3x3(com - trans, rot);

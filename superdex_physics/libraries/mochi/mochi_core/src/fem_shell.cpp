@@ -61,7 +61,8 @@ bool ShellWork(
     real bendingBeta,
     bool projectPsd,
     real stiffnessDampingFactor,
-    NdArray<BatchReal<kBatchSize>, kBendingStencilDofs> const* stageStartDisp) {
+    NdArray<BatchReal<kBatchSize>, kBendingStencilDofs> const* stageStartDisp,
+    BatchReal2x2<kBatchSize> const* plasticCurvature) {
   // TODO: Consider adding early exits for zero material parameters (hasMembrane/hasBending flags)
   // to skip membrane or bending computation entirely.
   using V = BatchReal<kBatchSize>;
@@ -155,7 +156,9 @@ bool ShellWork(
     // be precomputed.
     auto const refEdges = EdgeVectors<kBatchSize>(refPosX);
     auto const B = SecondFundamentalForm<kBatchSize>(refEdges);
-    V2x2 const kappa = B - curB;
+    V2x2 kappa = B - curB;
+    // A frozen per-element plastic offset changes only the elastic bending reference.
+    if (plasticCurvature) kappa = kappa + *plasticCurvature;
     s = Dot(AInv, kappa);
     sEff = s;
 
@@ -165,7 +168,9 @@ bool ShellWork(
       ExtrapolateStencilPositions<kBatchSize>(stencilGlobalNodes, curPosXStageStart);
       auto const curEdgesStageStart = EdgeVectors<kBatchSize>(curPosXStageStart);
       auto const curBStageStart = SecondFundamentalForm<kBatchSize>(curEdgesStageStart);
-      V2x2 const kappaStageStart = B - curBStageStart;
+      V2x2 kappaStageStart = B - curBStageStart;
+      // The same frozen reference must be used for both sides of stiffness damping.
+      if (plasticCurvature) kappaStageStart = kappaStageStart + *plasticCurvature;
       V2x2 const sStageStart = Dot(AInv, kappaStageStart);
       sEff = s - V{ssWeight} * sStageStart;
     }
@@ -237,7 +242,8 @@ static_assert(kDefaultFemBatchSize != 1, "Avoid duplicate explicit instantiation
       real,                                                                      \
       bool,                                                                      \
       real,                                                                      \
-      NdArray<BatchReal<BatchSize>, kBendingStencilDofs> const*);
+      NdArray<BatchReal<BatchSize>, kBendingStencilDofs> const*, \
+      BatchReal2x2<BatchSize> const*);
 
 MOCHI_INSTANTIATE_SHELL_WORK(1)
 MOCHI_INSTANTIATE_SHELL_WORK(kDefaultFemBatchSize)

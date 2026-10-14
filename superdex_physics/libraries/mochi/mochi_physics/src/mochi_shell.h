@@ -24,6 +24,7 @@
 #include "mochi_materials.h"
 #include "mochi_shape.h"
 #include "mochi_simulation.h"
+#include "mochi_shell_plasticity.h"
 #include "mochi_snle.h"
 
 #include <mochi_core/element_operations/element_assembler.h>
@@ -78,7 +79,8 @@ template <typename TriElementLow, typename TriElementHigh>
     Span<real const> stageStartVel,
     real dtStage,
     real massDampingScale,
-    real stiffnessDampingFactor) {
+    real stiffnessDampingFactor,
+    CShellPlasticity const* plasticity = nullptr) {
   static_assert(TriElementLow::kSpaceDim == ShellTriangleElement::kSpaceDim);
   static_assert(TriElementHigh::kSpaceDim == ShellTriangleElement::kSpaceDim);
   static_assert(TriElementLow::kNumDofs == ShellTriangleElement::kNumDofs);
@@ -195,6 +197,18 @@ template <typename TriElementLow, typename TriElementHigh>
 
     // --- Stress (membrane + bending) on the full 6-node stencil ---
     Span<Real3 const> meshNodes = lowElements[0].coordinates;
+    // Gather history with the same element permutation used by the assembly batch.
+    BatchReal2x2<kBatchSize> plasticCurvature;
+    if (plasticity) {
+      for (int row = 0; row < 2; ++row) {
+        for (int column = 0; column < 2; ++column) {
+          alignas(alignof(V)) real curvatureValues[V::kSize]{};
+          for (int lane = 0; lane < kBatchSize; ++lane)
+            curvatureValues[lane] = plasticity->curvature[elemIndices[lane]][row][column];
+          plasticCurvature[row][column] = Load<V>(curvatureValues);
+        }
+      }
+    }
     out |= fem::ShellWork<kBatchSize>(
         stencilGlobalNodes,
         meshNodes,
@@ -208,7 +222,8 @@ template <typename TriElementLow, typename TriElementHigh>
         bendingBeta,
         projectPsd,
         stiffnessDampingFactor,
-        hasStiffnessDamping ? &stageStartDispBatch : nullptr);
+        hasStiffnessDamping ? &stageStartDispBatch : nullptr,
+        plasticity ? &plasticCurvature : nullptr);
 
     return out;
   };
@@ -232,7 +247,8 @@ MOCHI_API void AssembleBody(
     CVelocitySlice<real, TimeStep::StageStart> const& stageStartVel,
     CMassMatrix const& massMatrix,
     CExternalForces const& externalForces,
-    CActorSnle& outActorSnle);
+    CActorSnle& outActorSnle,
+    CShellPlasticity const* plasticity);
 
 /**
  * @brief Add per-DoF external forces to the residual and objective for a shell actor with
@@ -298,7 +314,12 @@ void EntityPostLastStage(
     CDisplacementSlice<real, TimeStep::Current>& currDispl,
     CVelocitySlice<real, TimeStep::Current>& currVel,
     CIntegrationDisplacementSlices& intDispls,
-    CIntegrationVelocitySlices<DisplacementLayer::Default>& intVels);
+    CIntegrationVelocitySlices<DisplacementLayer::Default>& intVels,
+    CConvergenceStatus const& convergence,
+    CTriangularMesh const& mesh,
+    CLocal2GlobalMap const& localToGlobal,
+    CShellPlasticity* plasticity,
+    ecs::CtxGlobal<CSceneTime const> sceneTime);
 
 void EntityPostNewSolution(
     ColumnVectorView<real const> solution,

@@ -1778,6 +1778,12 @@ class ActorInterfaceImpl : public ActorInterface {
   }
 
   void SetZeroDisplacementsAndVelocities(Error& error) override {
+    // A reset returns the material as well as the coordinates to the authored state.
+    if (auto* plasticity = reg.try_get<CShellPlasticity>(e)) {
+      for (auto& curvature : plasticity->curvature)
+        for (int row = 0; row < 2; ++row)
+          for (int column = 0; column < 2; ++column) curvature[row][column] = 0_r;
+    }
     mochi::SetZeroDisplacements(reg, e, error);
     mochi::SetZeroVelocities(reg, e, error);
   }
@@ -3216,3 +3222,50 @@ void InitializeOnce(entt::registry& reg) {
 } // namespace actor
 
 } // namespace mochi
+
+// Optional Shell material history is configured only at the owning scene's safe boundary.
+/// <summary>Validates and creates per-actor curvature history without changing reference geometry.</summary>
+void mochi::experimental::SetShellPlasticity(Actor* actor, bool enabled,
+    real yieldCurvature, real flowRate, Error& error) {
+  MOCHI_ERROR_IF(!actor || actor->GetType() != ActorType::Shell, error, "Shell actor required.");
+  MOCHI_ERROR_RETURN(error);
+  auto* implementation = assert_cast<ActorInterfaceImpl*>(actor);
+  auto& registry = implementation->reg;
+  auto const entity = implementation->e;
+  auto& state = registry.get<CShellPlasticity>(entity);
+  // OFF selects the original assembly, clears history and preserves the snapshot component set.
+  if (!enabled) { state.enabled = false; state.curvature.clear(); return; }
+  MOCHI_ERROR_IF(!IsFinite(yieldCurvature) || yieldCurvature < 0_r ||
+      !IsFinite(flowRate) || flowRate <= 0_r, error, "Invalid Shell plasticity parameters.");
+  MOCHI_ERROR_RETURN(error);
+  if (!state.enabled) {
+    state.curvature.resize(registry.get<CLocal2GlobalMap>(entity).GetNumElements());
+    for (auto& curvature : state.curvature)
+      for (int row = 0; row < 2; ++row)
+        for (int column = 0; column < 2; ++column) curvature[row][column] = 0_r;
+  }
+  state.enabled = true;
+  state.yieldCurvature = yieldCurvature;
+  state.flowRate = flowRate;
+}
+
+/// <summary>Reads committed curvature without advancing plasticity or touching solver trial states.</summary>
+mochi::real mochi::experimental::GetShellPlasticCurvature(Actor const* actor, Error& error) {
+  MOCHI_ERROR_IF(!actor || actor->GetType() != ActorType::Shell, error, "Shell actor required.");
+  MOCHI_ERROR_RETURN(error, 0_r);
+  auto const* implementation = assert_cast<ActorInterfaceImpl const*>(actor);
+  auto const* state = implementation->reg.try_get<CShellPlasticity>(implementation->e);
+  if (!state || !state->enabled) return 0_r;
+  real maximum = 0_r;
+  auto const coordinates = implementation->reg.get<CTriangularMesh>(implementation->e).mesh->GetNodeCoordinates();
+  auto const& map = implementation->reg.get<CLocal2GlobalMap>(implementation->e);
+  for (int element = 0; element < map.GetNumElements(); ++element) {
+    auto const nodes = fem::GlobalStencilIndices(map.GetGlobalIndices(element), map.GetStencilIndices(element));
+    Real3 const firstEdge = coordinates[nodes[1]] - coordinates[nodes[0]];
+    Real3 const secondEdge = coordinates[nodes[2]] - coordinates[nodes[0]];
+    auto const metric = SymMatrix2x2(Dot(firstEdge, firstEdge), Dot(firstEdge, secondEdge), Dot(secondEdge, secondEdge));
+    auto const curvature = Dot(Invert(metric), state->curvature[element]);
+    maximum = std::max(maximum, std::sqrt(std::max(0_r, Trace(Dot(curvature, curvature)))));
+  }
+  return maximum;
+}

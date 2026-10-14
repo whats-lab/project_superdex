@@ -996,6 +996,11 @@ MOCHI_API Actor* CreateSoftSkinnedActor(
 
 MOCHI_API Actor* CreateShellActor(Scene* scene, ShellActorParams const& params, Error& error);
 
+/// <summary>Enables Shell bending plasticity; disabling discards history and restores the authored elastic reference.</summary>
+MOCHI_API void SetShellPlasticity(Actor* actor, bool enabled, real yieldCurvature, real flowRate, Error& error);
+/// <summary>Returns the largest committed plastic curvature for deterministic validation.</summary>
+MOCHI_API real GetShellPlasticCurvature(Actor const* actor, Error& error);
+
 MOCHI_API Actor* CreateRodActor(Scene* scene, RodActorParams const& params, Error& error);
 
 // Like Context::CreateModelShape, but with additional data for a linear ROM.

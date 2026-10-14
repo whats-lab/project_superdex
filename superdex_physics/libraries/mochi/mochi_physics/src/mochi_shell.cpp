@@ -15,6 +15,7 @@
  */
 
 #include "mochi_shell.h"
+#include <mochi_core/element_operations/plasticity.h>
 
 #include "mochi_contact.h"
 #include "mochi_core/contact/dmap.h"
@@ -29,7 +30,7 @@ using namespace mochi;
 
 // Call once on startup
 namespace mochi::shell {
-void InitializeOnce(entt::registry& /*reg*/) {}
+void InitializeOnce(entt::registry& reg) { ecs::RegisterComponent<CShellPlasticity>(reg); }
 
 real GetActorMass(entt::registry const& reg, entt::entity actor) {
   MOCHI_ASSERT(reg.all_of<TagShellActor>(actor), "Expected shell actor.");
@@ -180,7 +181,8 @@ void mochi::shell::AssembleBody(
     CVelocitySlice<real, TimeStep::StageStart> const& stageStartVel,
     CMassMatrix const& massMatrix,
     CExternalForces const& externalForces,
-    CActorSnle& outActorSnle) {
+    CActorSnle& outActorSnle,
+    CShellPlasticity const* plasticity) {
   bool const hasGravity = hasGravityTag;
 
   real const dtfi2 = 1_r / Sqr(intState.dtStage);
@@ -240,7 +242,7 @@ void mochi::shell::AssembleBody(
         stageStartVel.value.GetConstSpan(),
         intState.dtStage,
         massDampingScale,
-        stiffnessDampingFactor);
+        stiffnessDampingFactor, plasticity && plasticity->enabled ? plasticity : nullptr);
 
     AssembleObjResDRes<ShellStencilElement>(
         l2g,
@@ -325,11 +327,50 @@ void mochi::shell::EntityPostLastStage(
     CDisplacementSlice<real, TimeStep::Current>& currDispl,
     CVelocitySlice<real, TimeStep::Current>& currVel,
     CIntegrationDisplacementSlices& intDispls,
-    CIntegrationVelocitySlices<DisplacementLayer::Default>& intVels) {
+    CIntegrationVelocitySlices<DisplacementLayer::Default>& intVels,
+    CConvergenceStatus const& convergence,
+    CTriangularMesh const& mesh,
+    CLocal2GlobalMap const& localToGlobal,
+    CShellPlasticity* plasticity,
+    ecs::CtxGlobal<CSceneTime const> sceneTime) {
   // Displacement and velocity are differential variables. Compute their values at the end of
   // the time step using integration utilities.
   integration::ApplyTimeIntegration<TimeTarget::StepEnd>(intState, intDispls, currDispl);
   integration::ApplyTimeIntegration<TimeTarget::StepEnd>(intState, intVels, currVel);
+  // Failed solves must never commit irreversible material history.
+  if (!plasticity || !plasticity->enabled || convergence.stepStatus == ConvergenceStatus::Diverged) return;
+  auto const coordinates = mesh.mesh->GetNodeCoordinates();
+  auto const displacements = currDispl.value.GetConstSpan();
+  using V = BatchReal<1>;
+  for (int element = 0; element < localToGlobal.GetNumElements(); ++element) {
+    auto const nodes = fem::GlobalStencilIndices(
+        localToGlobal.GetGlobalIndices(element), localToGlobal.GetStencilIndices(element));
+    NdArray<int, fem::kBendingStencilNodes, 1> stencil;
+    NdArray<V, fem::kBendingStencilDofs> referencePositions, currentPositions;
+    // Boundary stencils use the same extrapolation as the elastic assembly.
+    for (int node = 0; node < fem::kBendingStencilNodes; ++node) {
+      stencil[node][0] = nodes[node];
+      int const safeNode = nodes[node] == kSentinelIndex ? 0 : nodes[node];
+      for (int axis = 0; axis < 3; ++axis) {
+        referencePositions[3 * node + axis] = V{coordinates[safeNode][axis]};
+        currentPositions[3 * node + axis] = V{coordinates[safeNode][axis] + displacements[3 * safeNode + axis]};
+      }
+    }
+    fem::ExtrapolateStencilPositions<1>(stencil, referencePositions);
+    fem::ExtrapolateStencilPositions<1>(stencil, currentPositions);
+    auto const referenceCurvature = fem::SecondFundamentalForm<1>(fem::EdgeVectors<1>(referencePositions));
+    auto const currentCurvature = fem::SecondFundamentalForm<1>(fem::EdgeVectors<1>(currentPositions));
+    BatchReal2x2<1> plasticCurvature;
+    for (int row = 0; row < 2; ++row)
+      for (int column = 0; column < 2; ++column)
+        plasticCurvature[row][column] = V{plasticity->curvature[element][row][column]};
+    if (!fem::UpdatePlasticCurvature(fem::Metric<1>(referencePositions),
+        currentCurvature - referenceCurvature, plasticity->yieldCurvature,
+        plasticity->flowRate, static_cast<real>(sceneTime->DeltaTime()), plasticCurvature)) continue;
+    for (int row = 0; row < 2; ++row)
+      for (int column = 0; column < 2; ++column)
+        plasticity->curvature[element][row][column] = plasticCurvature[row][column][0];
+  }
 }
 
 void mochi::shell::EntityPostNewSolution(

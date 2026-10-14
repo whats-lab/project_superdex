@@ -891,6 +891,8 @@ static void PostLastStageLocalPipeline(entt::registry& reg, CIslandDescendants c
   ecs::InvokeForEach(&rom::EntityPostLastStage, reg, descendants.softActors);
   skinned::PostLastStagePipeline(reg, descendants.skinnedActors);
   blended::PostLastStagePipeline(reg, descendants.blendedActors);
+  // The stress reference is finalized for full-order, reduced-order and posed soft parts here.
+  ecs::InvokeForEach(&soft::UpdatePlasticity, reg, descendants.softActors);
 
   // Update the rigid transform at the specified eval point.
   // Used for soft actors (both FOMs and ROMs).

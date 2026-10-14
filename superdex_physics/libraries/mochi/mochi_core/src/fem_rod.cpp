@@ -87,7 +87,9 @@ bool RodAxialStress(
     real axialStiffness,
     bool projectPsd,
     real stiffnessDampingFactor,
-    NdArray<BatchReal<kBatchSize>, kNumRodStencilDofs> const* stageStartDisp) {
+    NdArray<BatchReal<kBatchSize>, kNumRodStencilDofs> const* stageStartDisp,
+    Span<NdArray<real,4> const> plasticStrains,
+    BatchReal<kBatchSize>* rawStrain) {
   using V = BatchReal<kBatchSize>;
   using Vd = BatchDouble<kBatchSize>;
   using V3 = BatchReal3<kBatchSize>;
@@ -96,7 +98,8 @@ bool RodAxialStress(
   bool const evalObj = (outEnergy != nullptr);
   bool const evalRes = (outRes != nullptr);
   bool const evalDRes = (outDRes != nullptr);
-  if (!evalObj && !evalRes && !evalDRes) {
+  if(rawStrain) *rawStrain=V{0_r};
+  if (!evalObj && !evalRes && !evalDRes && !rawStrain) {
     return false;
   }
 
@@ -149,7 +152,14 @@ bool RodAxialStress(
   for (int i = 0; i < kSpaceDim; ++i) {
     q[i] = Select(isActive, invL * dx[i], V{0});
   }
-  V const strain = V{0.5_r} * (NormSqr(q) - V{1});
+  V strain = V{0.5_r} * (NormSqr(q) - V{1});
+  if(rawStrain) *rawStrain=Select(isActive,strain,V{0_r});
+  V offset{0_r};
+  // Frozen Green-strain offsets preserve mass and the original integration weights.
+  if(!plasticStrains.empty()) {
+    for(int lane=0;lane<kBatchSize;++lane) staging[lane]=plasticStrains[node0Idx[lane]][0];
+    offset=Load<V>(staging); strain-=offset;
+  }
 
   // Stiffness damping unified into the elastic formulas: scale the material stiffness by
   // (1 + factor) and use a modified strain ε̃ = ε − (factor/(1+factor))·ε₀ (ε₀ = stage-start
@@ -173,6 +183,7 @@ bool RodAxialStress(
       qSs[i] = Select(isActive, invL * dxSs[i], V{0});
     }
     strainSs = V{0.5_r} * (NormSqr(qSs) - V{1});
+    if(!plasticStrains.empty()) strainSs-=offset;
   }
   V const effStrain = strain - V{ssWeight} * strainSs;
   V const effStress = effEA * effStrain;
@@ -233,7 +244,9 @@ bool RodBendTwistStress(
     real torsionalStiffness,
     real stiffnessDampingFactor,
     NdArray<BatchReal<kBatchSize>, kNumRodStencilDofs> const* stageStartDisp,
-    Span<Real3 const> stageStartFrameAxes) {
+    Span<Real3 const> stageStartFrameAxes,
+    Span<NdArray<real,4> const> plasticStrains,
+    BatchReal3<kBatchSize>* rawStrains) {
   using V = BatchReal<kBatchSize>;
   using Vd = BatchDouble<kBatchSize>;
   using V3 = BatchReal3<kBatchSize>;
@@ -242,7 +255,8 @@ bool RodBendTwistStress(
   bool const evalObj = (outEnergy != nullptr);
   bool const evalRes = (outRes != nullptr);
   bool const evalDRes = (outDRes != nullptr);
-  if (!evalObj && !evalRes && !evalDRes) {
+  if(rawStrains) *rawStrains=BatchReal3<kBatchSize>{V{0_r},V{0_r},V{0_r}};
+  if (!evalObj && !evalRes && !evalDRes && !rawStrains) {
     return false;
   }
 
@@ -401,7 +415,7 @@ bool RodBendTwistStress(
     outTwist = Dot(IntegratedCurvatureBinormal(a0NodeL, a1NodeL), eAvgL);
   };
 
-  if (evalObj || evalRes) {
+  if (evalObj || evalRes || rawStrains) {
     V3 A0 MOCHI_NO_INIT, A1 MOCHI_NO_INIT;
     int const lastReferenceAxis = isize(referenceAxes) - 1;
     for (int d = 0; d < 3; ++d) {
@@ -442,6 +456,17 @@ bool RodBendTwistStress(
     kaStrain = ka - KA;
     kbStrain = kb - KB;
     twistStrain = dCurrentTwist - dReferenceTwist;
+    if(rawStrains) *rawStrains={Select(isActive,kaStrain,V{0_r}),Select(isActive,kbStrain,V{0_r}),Select(isActive,twistStrain,V{0_r})};
+    V plasticKa{0_r},plasticKb{0_r},plasticTwist{0_r};
+    if(!plasticStrains.empty()) {
+      for(int lane=0;lane<kBatchSize;++lane) staging[lane]=plasticStrains[node0Idx[lane]][1];
+      plasticKa=Load<V>(staging);
+      for(int lane=0;lane<kBatchSize;++lane) staging[lane]=plasticStrains[node0Idx[lane]][2];
+      plasticKb=Load<V>(staging);
+      for(int lane=0;lane<kBatchSize;++lane) staging[lane]=plasticStrains[node0Idx[lane]][3];
+      plasticTwist=Load<V>(staging);
+      kaStrain-=plasticKa; kbStrain-=plasticKb; twistStrain-=plasticTwist;
+    }
 
     // Stiffness-damping modified strains (equal to the plain strains when damping is disabled).
     effKa = kaStrain;
@@ -464,9 +489,9 @@ bool RodBendTwistStress(
       V kaSs MOCHI_NO_INIT, kbSs MOCHI_NO_INIT, twistSs MOCHI_NO_INIT;
       computeBendTwistProjections(*stageStartDisp, a0Ss, a1Ss, kaSs, kbSs, twistSs);
       // Stage-start strains reuse the same reference projections (KA/KB/dReferenceTwist).
-      effKa = kaStrain - V{ssWeight} * (kaSs - KA);
-      effKb = kbStrain - V{ssWeight} * (kbSs - KB);
-      effTwist = twistStrain - V{ssWeight} * (twistSs - dReferenceTwist);
+      effKa = kaStrain - V{ssWeight} * (kaSs - KA - plasticKa);
+      effKb = kbStrain - V{ssWeight} * (kbSs - KB - plasticKb);
+      effTwist = twistStrain - V{ssWeight} * (twistSs - dReferenceTwist - plasticTwist);
     }
 
     if (evalObj) {
@@ -645,7 +670,9 @@ static_assert(kDefaultFemBatchSize != 1, "Avoid duplicate explicit instantiation
       real,                                           \
       bool,                                           \
       real,                                           \
-      NdArray<BatchReal<BatchSize>, kNumRodStencilDofs> const*);
+      NdArray<BatchReal<BatchSize>, kNumRodStencilDofs> const*, \
+      Span<NdArray<real,4> const>, \
+      BatchReal<BatchSize>*);
 
 #define MOCHI_INSTANTIATE_ROD_BEND_TWIST_STRESS(BatchSize)      \
   template bool RodBendTwistStress<BatchSize>(                  \
@@ -662,7 +689,9 @@ static_assert(kDefaultFemBatchSize != 1, "Avoid duplicate explicit instantiation
       real,                                                     \
       real,                                                     \
       NdArray<BatchReal<BatchSize>, kNumRodStencilDofs> const*, \
-      Span<Real3 const>);
+      Span<Real3 const>, \
+      Span<NdArray<real,4> const>, \
+      BatchReal3<BatchSize>*);
 
 MOCHI_INSTANTIATE_ROD_AXIAL_STRESS(1)
 MOCHI_INSTANTIATE_ROD_AXIAL_STRESS(kDefaultFemBatchSize)

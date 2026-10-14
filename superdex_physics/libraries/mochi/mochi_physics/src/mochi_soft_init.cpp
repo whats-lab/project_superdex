@@ -233,6 +233,7 @@ void mochi::InitSoftActor(
 
   // Identification
   reg.emplace<TagSoftActor>(e);
+  reg.emplace_or_replace<CSoftPlasticity>(e);
   reg.emplace<TagDeformableActor>(e);
   reg.emplace<CActorInfo>(e, std::string(params.name), ActorType::Soft);
   reg.emplace_or_replace<CDofOffset>(e);

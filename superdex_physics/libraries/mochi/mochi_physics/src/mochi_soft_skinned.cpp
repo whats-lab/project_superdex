@@ -75,7 +75,7 @@ void skinned::EntityAssembleBody(
     CSoftSkinnedAssemblyScratchMemory& scratchMemory,
     CActorSnle& outSoftSnle,
     CSoftSkinnedUnposedSnle& outSoftSkinnedSnle,
-    CSkinnedInteractionSnle& outInteractionSnle) {
+    CSkinnedInteractionSnle& outInteractionSnle, CSoftPlasticity const* plasticity) {
   MOCHI_PROFILE_SCOPE();
 
   bool const hasPosedGravity = hasGravityTag && skinnedEnergy.gravity;
@@ -113,7 +113,7 @@ void skinned::EntityAssembleBody(
       stageStartVel ? stageStartVel->value : ColumnVector<real>{},
       massMatrix,
       outSoftSkinnedSnle,
-      activeVolElems);
+      activeVolElems, plasticity);
 
   // Transform the terms to the soft skinned actor
   auto softOffset = dofOffset.dofsOffset;

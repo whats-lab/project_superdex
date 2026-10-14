@@ -15,6 +15,7 @@
  */
 
 #include "mochi_soft.h"
+#include "mochi_rod.h"
 
 #include "mochi_actor_convergence.h"
 #include "mochi_contact.h"
@@ -217,7 +218,7 @@ void mochi::soft::AssembleBodyImpl(
     ColumnVectorView<real const> stageStartVel,
     CMassMatrix const& massMatrix,
     ActorSnle& outSnle,
-    CActiveVolumeElements const* activeVolElems) {
+    CActiveVolumeElements const* activeVolElems, CSoftPlasticity const* plasticity) {
   MOCHI_PROFILE_SCOPE();
   MOCHI_ASSERT_VERBOSE(
       !activeVolElems || !activeVolElems->empty(), "Active volume elements must not be empty.");
@@ -301,7 +302,8 @@ void mochi::soft::AssembleBodyImpl(
             massDampingScale,
             stiffnessDampingFactor,
             includeStiffnessDampingGeometricTerm,
-            activeVolWeights);
+            activeVolWeights,
+            plasticity && plasticity->enabled ? Span<NdArray<real,3,3> const>{plasticity->inverseDeformation.data(),plasticity->inverseDeformation.size()} : Span<NdArray<real,3,3> const>{});
 
         AssembleObjResDRes<SoftStencilElement>(
             l2g,
@@ -340,7 +342,7 @@ void mochi::soft::AssembleBody(
     CMassMatrix const& massMatrix,
     CRomProjectionStrategy const* romProjectionStrategy,
     CActorSnle& outActorSnle,
-    CActiveVolumeElements const* activeVolElems) {
+    CActiveVolumeElements const* activeVolElems, CSoftPlasticity const* plasticity) {
   MOCHI_ASSERT_VERBOSE(!isRom || romProjectionStrategy, "Missing ROM projection strategy.");
   bool const hasGravity = hasGravityTag && !skinnedEnergy.gravity;
   bool const hasInertia = hasInertiaTag && !skinnedEnergy.inertia;
@@ -380,7 +382,7 @@ void mochi::soft::AssembleBody(
       stageStartVel.value,
       massMatrix,
       outActorSnle,
-      activeVolElems);
+      activeVolElems, plasticity);
 }
 
 void mochi::soft::AssembleAsyncContact(
@@ -1053,6 +1055,24 @@ void mochi::SetZeroDisplacements(entt::registry& reg, entt::entity e, Error& err
   MOCHI_ERROR_RETURN(error);
   MOCHI_PROFILE_SCOPE();
 
+  // Reset all soft material references without changing their enablement or authored mesh.
+  if(auto* state=reg.try_get<CSoftPlasticity>(e)) {
+    for(int element=0;element<static_cast<int>(state->inverseDeformation.size());++element)
+      state->inverseDeformation[element]=Eye<3,real>();
+  }
+  if(auto* pose=reg.try_get<CRodPose<TimeStep::Current>>(e)) {
+    auto const& reference=reg.get<CReferenceElementFrameAxes>(e).axes;
+    pose->value.displacements.SetZero();pose->value.frameAxes=reference;
+    auto& previous=reg.get<CRodPose<TimeStep::Previous>>(e).value;
+    auto& stageStart=reg.get<CRodPose<TimeStep::StageStart>>(e).value;
+    previous.displacements.SetZero();previous.frameAxes=reference;
+    stageStart.displacements.SetZero();stageStart.frameAxes=reference;
+    auto& state=reg.get<CRodPlasticity>(e);
+    for(int node=0;node<static_cast<int>(state.strains.size());++node)
+      for(int component=0;component<4;++component)state.strains[node][component]=0_r;
+    InvalidateActorStepHistory(reg,e);
+    return;
+  }
   auto* currDispl = reg.try_get<CDisplacementSlice<real, TimeStep::Current>>(e);
   MOCHI_ERROR_IF(
       currDispl == nullptr, error, "CDisplacementSlice<real, TimeStep::Current> required.");
@@ -1171,7 +1191,7 @@ static void AssembleElasticEnergy(
     Local2GlobalMap const& l2g,
     CNodalBasedStructure const& nbs,
     real& outEnergy,
-    CActiveVolumeElements const* activeVolElems) {
+    CActiveVolumeElements const* activeVolElems, CSoftPlasticity const* plasticity = nullptr) {
   MOCHI_PROFILE_SCOPE();
 
   MOCHI_ASSERT(
@@ -1190,8 +1210,10 @@ static void AssembleElasticEnergy(
       materialParams, [&]<typename ParamsT>(auto const& perElem) {
         auto batchedConstitutive = materials::MakeBatchedConstitutiveResponse<ParamsT>(perElem);
 
+        auto mappedResponse=fem::PlasticConstitutiveResponse<kDefaultFemBatchSize>(batchedConstitutive,
+            plasticity && plasticity->enabled ? Span<NdArray<real,3,3> const>{plasticity->inverseDeformation.data(),plasticity->inverseDeformation.size()} : Span<NdArray<real,3,3> const>{});
         auto const stressEnergyOp = MakeBatchedStressEnergyOp(
-            MakeConstSpan(femVolLow.femElements), batchedConstitutive, activeVolWeights);
+            MakeConstSpan(femVolLow.femElements), mappedResponse, activeVolWeights);
 
         AssembleObjResDRes<soft::SoftStencilElement>(
             l2g,
@@ -1213,7 +1235,7 @@ void soft::UpdateQueryElasticEnergy(
     CLocal2GlobalMap const& l2g,
     CNodalBasedStructure const& nbs,
     CQueryElasticEnergy& outQuery,
-    CActiveVolumeElements const* activeVolElems) {
+    CActiveVolumeElements const* activeVolElems, CSoftPlasticity const* plasticity) {
   if (!hasStressTag) {
     outQuery.isEnergyAtRestInitialized = true;
     outQuery.energy = outQuery.energyAtRest = 0_r;
@@ -1226,7 +1248,7 @@ void soft::UpdateQueryElasticEnergy(
     outQuery.isEnergyAtRestInitialized = true;
   }
   AssembleElasticEnergy(
-      currDisp.value, femVolLow, material, l2g, nbs, outQuery.energy, activeVolElems);
+      currDisp.value, femVolLow, material, l2g, nbs, outQuery.energy, activeVolElems, plasticity);
 }
 
 void soft::UpdateQueryElementsDeformationGradient(
@@ -1438,6 +1460,7 @@ MOCHI_API void soft::UpdateRigidVelocity(
 }
 
 void soft::InitializeOnce(entt::registry& reg) {
+  ecs::RegisterComponent<CSoftPlasticity>(reg);
   ecs::RegisterComponent<CActorAsyncContactSemaphore>(reg);
   ecs::RegisterComponent<CRigidTransformEval>(reg);
   ecs::RegisterComponent<CRigidTransformEvalPoint>(reg);
@@ -1452,4 +1475,40 @@ real soft::GetActorMass(entt::registry const& reg, entt::entity actor) {
   auto const& mesh = reg.get<CTetrahedralMesh>(actor);
   real const volume = mesh.mesh->GetTotalMeasure();
   return material.density * volume;
+}
+
+// All supported soft representations expose the displacement on which their stress is evaluated.
+/// <summary>Commits energy-decreasing plastic reference changes after FOM, ROM and skin poses are finalized.</summary>
+void mochi::soft::UpdatePlasticity(
+    ecs::Included<TagSoftActor>, ecs::OptionalTag<TagUseStress> hasStress,
+    ecs::CtxGlobal<CSceneTime const> time, CConvergenceStatus const& convergence,
+    CStressDisplacementRef const& displacement, FemInfo const& discretization,
+    CSoftMaterialParams const& material, CSoftPlasticity& state) {
+  if(!state.enabled || !hasStress || convergence.stepStatus==ConvergenceStatus::Diverged) return;
+  using V=BatchReal<1>;
+  auto const& elements=discretization.femElements;
+  details::VisitPerElementMaterialParams(material,[&]<typename ParamsT>(auto const& parameters) {
+    auto response=materials::MakeBatchedConstitutiveResponse<ParamsT,1>(parameters);
+    for(int element=0;element<isize(elements);++element) {
+      auto const& geometry=elements[element];
+      auto const& nodes=geometry.Nodes();
+      auto deformation=Eye<3,V>();
+      // The original element gradients remain fixed; plasticity changes only its elastic reference.
+      for(int node=0;node<4;++node) for(int row=0;row<3;++row) for(int column=0;column<3;++column)
+        deformation[row][column]+=V{displacement.value[nodes[node]*3+row]*geometry.dBasisEvaluated[0][node][column]};
+      BatchReal3x3<1> inverse,candidate;
+      for(int row=0;row<3;++row) for(int column=0;column<3;++column)
+        inverse[row][column]=V{state.inverseDeformation[element][row][column]};
+      if(!fem::PlasticDeformationCandidate(deformation,inverse,state.yieldStrain,state.flowRate,
+          static_cast<real>(time->DeltaTime()),candidate)) continue;
+      NdArray<int,1> indices{element};
+      BatchDouble<1> before,after;
+      response(indices,Dot(deformation,inverse),&before,static_cast<BatchReal3x3<1>*>(nullptr),static_cast<NdArray<BatchReal3x3<1>,3,3>*>(nullptr),false);
+      response(indices,Dot(deformation,candidate),&after,static_cast<BatchReal3x3<1>*>(nullptr),static_cast<NdArray<BatchReal3x3<1>,3,3>*>(nullptr),false);
+      // Active/anisotropic materials may have a non-identity natural shape, so reject energy-increasing flow.
+      if(!std::isfinite(after[0]) || after[0]>before[0]) continue;
+      for(int row=0;row<3;++row) for(int column=0;column<3;++column)
+        state.inverseDeformation[element][row][column]=candidate[row][column][0];
+    }
+  });
 }

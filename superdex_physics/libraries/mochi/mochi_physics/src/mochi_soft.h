@@ -17,6 +17,7 @@
 #pragma once
 
 #include "mochi_common_components.h"
+#include "mochi_deformable_plasticity.h"
 #include "mochi_contact.h"
 #include "mochi_discretization_components.h"
 #include "mochi_ecs.h"
@@ -28,6 +29,7 @@
 
 #include <mochi_core/element_operations/element_assembler.h>
 #include <mochi_core/element_operations/fem_gravity.h>
+#include <mochi_core/element_operations/plasticity_solid.h>
 #include <mochi_core/element_operations/fem_inertia.h>
 #include <mochi_core/element_operations/fem_stress.h>
 #include <mochi_core/element_operations/fem_stress_damping.h>
@@ -142,7 +144,7 @@ void UpdateQueryElasticEnergy(
     CLocal2GlobalMap const& l2g,
     CNodalBasedStructure const& nbs,
     CQueryElasticEnergy& outQuery,
-    CActiveVolumeElements const* activeVolElems);
+    CActiveVolumeElements const* activeVolElems, CSoftPlasticity const* plasticity);
 
 void UpdateQueryElementsDeformationGradient(
     ecs::RequiredTag<TagSoftActor>,
@@ -334,7 +336,8 @@ template <
     real massDampingScale,
     real stiffnessDampingFactor,
     bool includeStiffnessDampingGeometricTerm,
-    Span<real const> activeVolWeights) {
+    Span<real const> activeVolWeights,
+    Span<NdArray<real,3,3> const> inversePlastic = {}) {
   real const dtfi2 = 1_r / Sqr(dtStage);
 
   // Hoist the homogeneous reference-stiffness broadcast out of the per-batch lambda. When the store
@@ -362,6 +365,8 @@ template <
     bool const hasMassDamping = hasInertia && massDampingScale > 0_r;
 
     if (hasStress) {
+      // OFF calls the original kernel; ON maps the frozen per-element material reference.
+      if(inversePlastic.empty()) {
       out |= fem::StressWork<kBatchSize>(
           elemIndices,
           lowVolElements,
@@ -372,6 +377,11 @@ template <
           projectPsd,
           batchedConstitutive,
           activeVolWeights);
+      } else {
+        auto response=fem::PlasticConstitutiveResponse<kBatchSize>(batchedConstitutive,inversePlastic);
+        out |= fem::StressWork<kBatchSize>(elemIndices,lowVolElements,displ,outEnergy,outRes,
+            outDRes,projectPsd,response,activeVolWeights);
+      }
     }
     if (hasGravity && (outEnergy || outRes)) {
       out |= fem::GravityWork<kBatchSize>(
@@ -682,7 +692,7 @@ MOCHI_API void AssembleBody(
     CMassMatrix const& massMatrix,
     CRomProjectionStrategy const* romProjectionStrategy,
     CActorSnle& outActorSnle,
-    CActiveVolumeElements const* activeVolumeElems = nullptr);
+    CActiveVolumeElements const* activeVolumeElems = nullptr, CSoftPlasticity const* plasticity = nullptr);
 
 // Implementation of AssembleBody, which admits different components for the result Snle.
 void AssembleBodyImpl(
@@ -703,7 +713,7 @@ void AssembleBodyImpl(
     ColumnVectorView<real const> stageStartVel,
     CMassMatrix const& massMatrix,
     ActorSnle& outSnle,
-    CActiveVolumeElements const* activeVolElems = nullptr);
+    CActiveVolumeElements const* activeVolElems = nullptr, CSoftPlasticity const* plasticity = nullptr);
 
 void AssembleAsyncContact(
     AssemblyParams const& params, // external parameter
@@ -780,6 +790,11 @@ void UpdateBounds(
 
 // Call once on startup
 void InitializeOnce(entt::registry& reg);
+/// <summary>Updates only irreversible per-actor material state at the finalized step boundary.</summary>
+void UpdatePlasticity(ecs::Included<TagSoftActor>, ecs::OptionalTag<TagUseStress> hasStress,
+    ecs::CtxGlobal<CSceneTime const> time, CConvergenceStatus const& convergence,
+    CStressDisplacementRef const& displacement, FemInfo const& discretization,
+    CSoftMaterialParams const& material, CSoftPlasticity& state);
 
 // Get the mass of a soft actor.
 [[nodiscard]] real GetActorMass(entt::registry const& reg, entt::entity actor);

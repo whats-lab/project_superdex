@@ -3269,3 +3269,81 @@ mochi::real mochi::experimental::GetShellPlasticCurvature(Actor const* actor, Er
   }
   return maximum;
 }
+
+// Model-specific material state stays private to the actor and is switched at a scene-safe boundary.
+/// <summary>Enables finite-strain plastic references for a soft actor or every nested soft part.</summary>
+void mochi::experimental::SetSoftPlasticity(Actor* actor,bool enabled,real yieldStrain,real flowRate,Error& error) {
+  MOCHI_ERROR_IF(!actor,error,"Soft actor required.");MOCHI_ERROR_RETURN(error);
+  if(actor->GetType()==ActorType::Articulated) {
+    auto handles=actor->GetNestedSoftActors(error);MOCHI_ERROR_RETURN(error);
+    MOCHI_ERROR_IF(handles.empty(),error,"Actor has no soft parts.");MOCHI_ERROR_RETURN(error);
+    for(int index=0;index<isize(handles);++index) {
+      auto* part=actor->GetScene()->GetActor(handles[index]);MOCHI_ERROR_RETURN(error);
+      SetSoftPlasticity(part,enabled,yieldStrain,flowRate,error);MOCHI_ERROR_RETURN(error);
+    }
+    return;
+  }
+  auto* implementation=assert_cast<ActorInterfaceImpl*>(actor);
+  auto* state=implementation->reg.try_get<CSoftPlasticity>(implementation->e);
+  MOCHI_ERROR_IF(!state,error,"Volumetric soft actor required.");MOCHI_ERROR_RETURN(error);
+  if(!enabled) {state->enabled=false;state->inverseDeformation.clear();return;}
+  MOCHI_ERROR_IF(!IsFinite(yieldStrain)||yieldStrain<0_r||!IsFinite(flowRate)||flowRate<=0_r,error,"Invalid solid plasticity parameters.");
+  MOCHI_ERROR_RETURN(error);
+  if(!state->enabled) {
+    int count=isize(implementation->reg.get<CFemVolumeDiscretizationP1Q1>(implementation->e).femElements);
+    state->inverseDeformation.resize(count);
+    for(int element=0;element<count;++element)state->inverseDeformation[element]=Eye<3,real>();
+  }
+  state->yieldStrain=yieldStrain;state->flowRate=flowRate;state->enabled=true;
+}
+/// <summary>Enables node-stencil axial, bending and twist reference offsets for a rod.</summary>
+void mochi::experimental::SetRodPlasticity(Actor* actor,bool enabled,real yieldStrain,real yieldCurvature,real yieldTwist,real flowRate,Error& error) {
+  MOCHI_ERROR_IF(!actor||actor->GetType()!=ActorType::Rod,error,"Rod actor required.");MOCHI_ERROR_RETURN(error);
+  auto* implementation=assert_cast<ActorInterfaceImpl*>(actor);
+  auto& state=implementation->reg.get<CRodPlasticity>(implementation->e);
+  if(!enabled) {state.enabled=false;state.strains.clear();return;}
+  MOCHI_ERROR_IF(!IsFinite(yieldStrain)||yieldStrain<0_r||!IsFinite(yieldCurvature)||yieldCurvature<0_r||
+      !IsFinite(yieldTwist)||yieldTwist<0_r||!IsFinite(flowRate)||flowRate<=0_r,error,"Invalid rod plasticity parameters.");
+  MOCHI_ERROR_RETURN(error);
+  if(!state.enabled) {
+    state.strains.resize(implementation->reg.get<CPolylineMesh>(implementation->e).nodes.size());
+    for(int node=0;node<static_cast<int>(state.strains.size());++node)
+      for(int component=0;component<4;++component)state.strains[node][component]=0_r;
+  }
+  state.yieldStrain=yieldStrain;state.yieldCurvature=yieldCurvature;state.yieldTwist=yieldTwist;
+  state.flowRate=flowRate;state.enabled=true;
+}
+/// <summary>Reads committed material reference changes, aggregating nested soft parts when needed.</summary>
+mochi::real mochi::experimental::GetSoftPlasticityMagnitude(Actor const* actor,Error& error) {
+  MOCHI_ERROR_IF(!actor,error,"Soft actor required.");MOCHI_ERROR_RETURN(error,0_r);
+  real maximum=0_r;
+  if(actor->GetType()==ActorType::Articulated) {
+    auto handles=actor->GetNestedSoftActors(error);MOCHI_ERROR_RETURN(error,0_r);
+    for(int index=0;index<isize(handles);++index) {
+      auto const* part=actor->GetScene()->GetActor(handles[index]);MOCHI_ERROR_RETURN(error,0_r);
+      maximum=std::max(maximum,GetSoftPlasticityMagnitude(part,error));MOCHI_ERROR_RETURN(error,0_r);
+    }
+    return maximum;
+  }
+  auto const* implementation=assert_cast<ActorInterfaceImpl const*>(actor);
+  auto const* state=implementation->reg.try_get<CSoftPlasticity>(implementation->e);
+  MOCHI_ERROR_IF(!state,error,"Volumetric soft actor required.");MOCHI_ERROR_RETURN(error,0_r);
+  if(!state->enabled)return 0_r;
+  for(int element=0;element<static_cast<int>(state->inverseDeformation.size());++element)
+    maximum=std::max(maximum,std::sqrt(NormSqr(state->inverseDeformation[element]-Eye<3,real>())));
+  return maximum;
+}
+/// <summary>Reports rod history without committing new plastic flow.</summary>
+void mochi::experimental::GetRodPlasticity(Actor const* actor,real& stretch,real& curvature,real& twist,Error& error) {
+  stretch=curvature=twist=0_r;
+  MOCHI_ERROR_IF(!actor||actor->GetType()!=ActorType::Rod,error,"Rod actor required.");MOCHI_ERROR_RETURN(error);
+  auto const* implementation=assert_cast<ActorInterfaceImpl const*>(actor);
+  auto const& state=implementation->reg.get<CRodPlasticity>(implementation->e);
+  if(!state.enabled)return;
+  for(int node=0;node<static_cast<int>(state.strains.size());++node) {
+    auto const& value=state.strains[node];
+    stretch=std::max(stretch,std::abs(value[0]));
+    curvature=std::max(curvature,std::sqrt(value[1]*value[1]+value[2]*value[2]));
+    twist=std::max(twist,std::abs(value[3]));
+  }
+}

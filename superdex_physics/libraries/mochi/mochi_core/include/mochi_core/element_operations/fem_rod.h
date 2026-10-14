@@ -484,7 +484,9 @@ bool RodAxialStress(
     real axialStiffness,
     bool projectPsd,
     real stiffnessDampingFactor = 0_r,
-    NdArray<BatchReal<kBatchSize>, kNumRodStencilDofs> const* stageStartDisp = nullptr);
+    NdArray<BatchReal<kBatchSize>, kNumRodStencilDofs> const* stageStartDisp = nullptr,
+    Span<NdArray<real,4> const> plasticStrains = {},
+    BatchReal<kBatchSize>* rawStrain = nullptr);
 
 /// @brief Compute bending + torsion stress work for a batch of rod stencils.
 ///
@@ -533,6 +535,8 @@ bool RodBendTwistStress(
     real torsionalStiffness,
     real stiffnessDampingFactor = 0_r,
     NdArray<BatchReal<kBatchSize>, kNumRodStencilDofs> const* stageStartDisp = nullptr,
-    Span<Real3 const> stageStartFrameAxes = {});
+    Span<Real3 const> stageStartFrameAxes = {},
+    Span<NdArray<real,4> const> plasticStrains = {},
+    BatchReal3<kBatchSize>* rawStrains = nullptr);
 
 } // namespace mochi::fem

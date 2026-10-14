@@ -152,7 +152,7 @@ MOCHI_API void mochi::rom::AssembleAndProjectBody(
     CPerElementMassMatrix<CFemVolumeDiscretizationP1Q4> const& perElemMass,
     CRomJacobian const& jacobian,
     CActorSnle& outSnle,
-    CActiveVolumeElements const* activeVolElems) {
+    CActiveVolumeElements const* activeVolElems, CSoftPlasticity const* plasticity) {
   MOCHI_PROFILE_SCOPE();
   if (projectionStrategy.value != RomProjectionStrategy::ElementLevelProjection) {
     // Skip if not using element-level projection.
@@ -261,7 +261,8 @@ MOCHI_API void mochi::rom::AssembleAndProjectBody(
             massDampingScale,
             stiffnessDampingFactor,
             includeStiffnessDampingGeometricTerm,
-            activeVolWeights);
+            activeVolWeights,
+            plasticity && plasticity->enabled ? Span<NdArray<real,3,3> const>{plasticity->inverseDeformation.data(),plasticity->inverseDeformation.size()} : Span<NdArray<real,3,3> const>{});
 
         AssembleAndProjectObjResDRes<soft::SoftStencilElement>(
             l2g,

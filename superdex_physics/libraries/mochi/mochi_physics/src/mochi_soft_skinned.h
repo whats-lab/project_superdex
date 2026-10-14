@@ -104,7 +104,7 @@ void EntityAssembleBody(
     CSoftSkinnedAssemblyScratchMemory& scratchMemory,
     CActorSnle& outSoftSnle,
     CSoftSkinnedUnposedSnle& outSoftSkinnedSnle,
-    CSkinnedInteractionSnle& outInteractionSnle);
+    CSkinnedInteractionSnle& outInteractionSnle, CSoftPlasticity const* plasticity);
 
 // Method to initialize a soft skinned actor.
 void InitSkinnedActor(

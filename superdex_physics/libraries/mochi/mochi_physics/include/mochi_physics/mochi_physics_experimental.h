@@ -1000,6 +1000,15 @@ MOCHI_API Actor* CreateShellActor(Scene* scene, ShellActorParams const& params, 
 MOCHI_API void SetShellPlasticity(Actor* actor, bool enabled, real yieldCurvature, real flowRate, Error& error);
 /// <summary>Returns the largest committed plastic curvature for deterministic validation.</summary>
 MOCHI_API real GetShellPlasticCurvature(Actor const* actor, Error& error);
+/// <summary>Sets solid material plasticity, including nested soft parts, without changing authored geometry.</summary>
+MOCHI_API void SetSoftPlasticity(Actor* actor, bool enabled, real yieldStrain, real flowRate, Error& error);
+/// <summary>Sets axial, bending and torsional yield for a rod actor.</summary>
+MOCHI_API void SetRodPlasticity(Actor* actor, bool enabled, real yieldStrain, real yieldCurvature, real yieldTwist, real flowRate, Error& error);
+/// <summary>Reads the greatest committed change in the solid material reference.</summary>
+MOCHI_API real GetSoftPlasticityMagnitude(Actor const* actor, Error& error);
+/// <summary>Reads rod history in Green strain, curvature and integrated twist units.</summary>
+MOCHI_API void GetRodPlasticity(Actor const* actor, real& stretch, real& curvature, real& twist, Error& error);
+
 
 MOCHI_API Actor* CreateRodActor(Scene* scene, RodActorParams const& params, Error& error);
 

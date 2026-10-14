@@ -161,7 +161,7 @@ MOCHI_API void AssembleAndProjectBody(
     CPerElementMassMatrix<CFemVolumeDiscretizationP1Q4> const& perElemMass,
     CRomJacobian const& jacobian,
     CActorSnle& outSnle,
-    CActiveVolumeElements const* activeVolElems = nullptr);
+    CActiveVolumeElements const* activeVolElems = nullptr, CSoftPlasticity const* plasticity = nullptr);
 
 // Assemble and project async contact.
 void AssembleAndProjectAsyncContact(

@@ -79,6 +79,7 @@ std::pair<Graph<int, int>, Graph<int, int>> mochi::GenerateRodConnectivityAndSte
 
 namespace mochi::rod {
 void InitializeOnce(entt::registry& reg) {
+  ecs::RegisterComponent<CRodPlasticity>(reg);
   ecs::RegisterComponent<CPolylineMesh>(reg);
   ecs::RegisterComponent<CNodalMasses>(reg);
   ecs::RegisterComponent<CElementRotationalInertias>(reg);
@@ -268,10 +269,51 @@ void EntityPostLastStage(
     CRodPose<TimeStep::Current>& currPose,
     CVelocitySlice<real, TimeStep::Current>& currVel,
     CIntegrationVelocitySlices<DisplacementLayer::Default>& intVels,
-    CIntegrationRodPoses& intPoses) {
+    CIntegrationRodPoses& intPoses,
+    CConvergenceStatus const& convergence, ecs::CtxGlobal<CSceneTime const> time,
+    CLocal2GlobalMap const& map, CReferenceElementFrameAxes const& referenceAxes,
+    CRodMaterialParams const& material, CRodPlasticity& plasticity) {
   mochi::integration::ApplyTimeIntegration<TimeTarget::StepEnd>(
       MakeConstSpan(mesh.nodes), intState, intPoses, currPose);
   mochi::integration::ApplyTimeIntegration<TimeTarget::StepEnd>(intState, intVels, currVel);
+  // Solver trials never modify material history; diverged steps do not commit it either.
+  if(!plasticity.enabled || convergence.stepStatus==ConvergenceStatus::Diverged) return;
+  using V=BatchReal<1>;
+  auto const indices=map.GetPaddedGlobalIndices();
+  real const fraction=-std::expm1(-plasticity.flowRate*static_cast<real>(time->DeltaTime()));
+  for(int stencil=0;stencil<map.GetNumElements();++stencil) {
+    NdArray<int,1> elementIndex{stencil};
+    fem::BatchRodVector<1> displacement;
+    // Boundary padding is interpreted exactly as in the existing stress kernels.
+    int nodes[3];
+    for(int node=0;node<3;++node) {
+      nodes[node]=fem::details::RodStencilNodeIndex(indices,stencil,node);
+      for(int field=0;field<4;++field)
+        displacement[4*node+field]=V{currPose.value.displacements[4*nodes[node]+field]};
+    }
+    V axial;
+    BatchReal3<1> bending;
+    fem::RodAxialStress<1>(mesh.nodes,displacement,elementIndex,indices,nullptr,nullptr,nullptr,
+        material.axialStiffness,false,0_r,nullptr,{},&axial);
+    fem::RodBendTwistStress<1>(mesh.nodes,MakeConstSpan(currPose.value.frameAxes),referenceAxes.axes,
+        displacement,elementIndex,indices,nullptr,nullptr,nullptr,material.flexuralStiffness,
+        material.torsionalStiffness,0_r,nullptr,{}, {}, &bending);
+    auto& state=plasticity.strains[nodes[0]];
+    real const stretchDelta=axial[0]-state[0];
+    if(material.axialStiffness>0_r && std::isfinite(stretchDelta) && std::abs(stretchDelta)>plasticity.yieldStrain)
+      state[0]+=fraction*(1_r-plasticity.yieldStrain/std::abs(stretchDelta))*stretchDelta;
+    real const first=bending[0][0]-state[1], second=bending[1][0]-state[2];
+    real const magnitude=std::sqrt(first*first+second*second);
+    if(Max(material.flexuralStiffness)>0_r && std::isfinite(magnitude) && magnitude>plasticity.yieldCurvature) {
+      real const transfer=fraction*(1_r-plasticity.yieldCurvature/magnitude);
+      state[1]+=transfer*first;state[2]+=transfer*second;
+    }
+    real const length=0.5_r*(Norm(mesh.nodes[nodes[1]]-mesh.nodes[nodes[0]])+Norm(mesh.nodes[nodes[2]]-mesh.nodes[nodes[1]]));
+    real const twistDelta=bending[2][0]-state[3];
+    real const twistMagnitude=length>0_r ? std::abs(twistDelta)/length : 0_r;
+    if(material.torsionalStiffness>0_r && std::isfinite(twistMagnitude) && twistMagnitude>plasticity.yieldTwist)
+      state[3]+=fraction*(1_r-plasticity.yieldTwist/twistMagnitude)*twistDelta;
+  }
 }
 
 // Update CDirichletBC based on CDofPositionsBC (if any)
@@ -1431,6 +1473,7 @@ void mochi::InitRodActor(
 
   // Emplace the rod material parameters
   reg.emplace<CRodMaterialParams>(e, params.material);
+  reg.emplace<CRodPlasticity>(e);
 
   if (params.hasGravity) {
     reg.emplace<TagUseGravity>(e);
@@ -1502,7 +1545,7 @@ static void AddExternalForces(
     Span<real const> stageStartDispl,
     Span<real const> stageStartVel,
     Span<Real3 const> stageStartFrameAxes,
-    real dtStage) {
+    real dtStage, Span<NdArray<real,4> const> plasticStrains) {
   constexpr int kBatchSize = kDefaultFemBatchSize;
   constexpr int kStencilDofs = fem::kNumRodStencilDofs;
   real const dtfi2 = 1_r / Sqr(dtStage);
@@ -1631,7 +1674,7 @@ static void AddExternalForces(
         materialParams.axialStiffness,
         projectPsd,
         stiffnessDampingFactor,
-        stageStartDispPtr);
+        stageStartDispPtr, plasticStrains);
 
     if ((Max(materialParams.flexuralStiffness) > 0_r) ||
         (materialParams.torsionalStiffness > 0_r)) {
@@ -1649,7 +1692,7 @@ static void AddExternalForces(
           materialParams.torsionalStiffness,
           stiffnessDampingFactor,
           stageStartDispPtr,
-          hasStiffnessDamping ? stageStartFrameAxes : Span<Real3 const>{});
+          hasStiffnessDamping ? stageStartFrameAxes : Span<Real3 const>{}, plasticStrains);
     }
 
     return out;
@@ -1674,7 +1717,7 @@ void AssembleBody(
     CVelocitySlice<real, TimeStep::StageStart> const& stageStartVel,
     CExternalForces const& externalForces,
     CActorSnle& outActorSnle,
-    CNodalBasedStructure const& nbs) {
+    CNodalBasedStructure const& nbs, CRodPlasticity const& plasticity) {
   MOCHI_PROFILE_SCOPE();
   bool const hasGravity = hasGravityTag;
 
@@ -1715,7 +1758,8 @@ void AssembleBody(
         stageStartPose.value.displacements,
         stageStartVel.value,
         MakeConstSpan(stageStartPose.value.frameAxes),
-        intState.dtStage);
+        intState.dtStage,
+        plasticity.enabled ? Span<NdArray<real,4> const>{plasticity.strains.data(),plasticity.strains.size()} : Span<NdArray<real,4> const>{});
 
     AssembleObjResDRes<fem::RodStencilElement, fem::kNumRodFields>(
         l2g,

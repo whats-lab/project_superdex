@@ -17,6 +17,7 @@
 #pragma once
 
 #include "mochi_common_components.h"
+#include "mochi_deformable_plasticity.h"
 #include "mochi_contact.h"
 #include "mochi_discretization_components.h"
 #include "mochi_ecs.h"
@@ -209,7 +210,7 @@ namespace rod {
     Span<real const> stageStartDispl,
     Span<real const> stageStartVel,
     Span<Real3 const> stageStartFrameAxes,
-    real dtStage);
+    real dtStage, Span<NdArray<real,4> const> plasticStrains = {});
 
 void AssembleBody(
     AssemblyParams const& params,
@@ -229,7 +230,7 @@ void AssembleBody(
     CVelocitySlice<real, TimeStep::StageStart> const& stageStartVel,
     CExternalForces const& externalForces,
     CActorSnle& outActorSnle,
-    CNodalBasedStructure const& nbs);
+    CNodalBasedStructure const& nbs, CRodPlasticity const& plasticity);
 
 /**************************************************************************
   ECS Systems for Rod Actors
@@ -343,7 +344,10 @@ void EntityPostLastStage(
     CRodPose<TimeStep::Current>& currPose,
     CVelocitySlice<real, TimeStep::Current>& currVel,
     CIntegrationVelocitySlices<DisplacementLayer::Default>& intVels,
-    CIntegrationRodPoses& intPoses);
+    CIntegrationRodPoses& intPoses,
+    CConvergenceStatus const& convergence, ecs::CtxGlobal<CSceneTime const> time,
+    CLocal2GlobalMap const& map, CReferenceElementFrameAxes const& referenceAxes,
+    CRodMaterialParams const& material, CRodPlasticity& plasticity);
 
 void AssembleAsyncContact(
     AssemblyParams const& params,

@@ -76,7 +76,8 @@ bool ShellWork(
     bool projectPsd,
     real stiffnessDampingFactor,
     NdArray<BatchReal<kBatchSize>, kBendingStencilDofs> const* stageStartDisp,
-    BatchReal2x2<kBatchSize> const* plasticCurvature) {
+    BatchReal2x2<kBatchSize> const* plasticCurvature,
+    BatchReal<kBatchSize> thicknessRatio) {
   // TODO: Consider adding early exits for zero material parameters (hasMembrane/hasBending flags)
   // to skip membrane or bending computation entirely.
   using V = BatchReal<kBatchSize>;
@@ -93,7 +94,10 @@ bool ShellWork(
       stiffnessDampingFactor == 0_r || stageStartDisp != nullptr,
       "Nonzero stiffnessDampingFactor requires stageStartDisp.");
 
-  V const vLambda{membraneLambda}, vMu{membraneMu}, vAlpha{bendingAlpha}, vBeta{bendingBeta};
+  // Physical thickness scales membrane linearly and bending cubically at each material element.
+  V const bendingRatio=thicknessRatio*thicknessRatio*thicknessRatio;
+  V const vLambda=V{membraneLambda}*thicknessRatio, vMu=V{membraneMu}*thicknessRatio;
+  V const vAlpha=V{bendingAlpha}*bendingRatio, vBeta=V{bendingBeta}*bendingRatio;
 
   // Stiffness damping unified into the elastic formulas: scale the material stiffnesses by
   // (1 + factor) and use modified strains ε̃ = ε − (factor/(1+factor))·ε₀ (ε₀ = stage-start
@@ -234,7 +238,7 @@ bool ShellWork(
     V const u = detC * invTrC;
     V const p =
         Select(trC >= trCFloor, Max(V{-2_r} * Trace(Dot(adjC, epsilon)) * invTrC, V{0_r}), V{1_r});
-    V const vK{membraneCollapseBarrierStiffness};
+    V const vK=V{membraneCollapseBarrierStiffness}*thicknessRatio;
 
     // The exact energy k·A·p³/u³, stress 3k·p²·M̂/u⁴, and Gauss–Newton tangent
     // 6k·A·p/u⁵ · (M̂ : ∂a/∂x)⊗(M̂ : ∂a/∂x) diverge as u → 0. Each is regularized independently by
@@ -323,7 +327,7 @@ static_assert(kDefaultFemBatchSize != 1, "Avoid duplicate explicit instantiation
       bool,                                                                      \
       real,                                                                      \
       NdArray<BatchReal<BatchSize>, kBendingStencilDofs> const*, \
-      BatchReal2x2<BatchSize> const*);
+      BatchReal2x2<BatchSize> const*, BatchReal<BatchSize>);
 
 MOCHI_INSTANTIATE_SHELL_WORK(1)
 MOCHI_INSTANTIATE_SHELL_WORK(kDefaultFemBatchSize)

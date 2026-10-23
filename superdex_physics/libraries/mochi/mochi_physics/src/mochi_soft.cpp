@@ -1443,6 +1443,10 @@ void mochi::soft::UpdatePlasticity(
   details::VisitPerElementMaterialParams(material,[&]<typename ParamsT>(auto const& parameters) {
     auto response=materials::MakeBatchedConstitutiveResponse<ParamsT,1>(parameters);
     for(int element=0;element<isize(elements);++element) {
+      // Region membership is fixed in the authored material frame, not the deformed world-space surface.
+      bool const hasOverride=state.useRegionOverrides && state.elementYield[element]>=0_r;
+      real const yieldStrain=hasOverride ? state.elementYield[element] : state.yieldStrain;
+      real const flowRate=hasOverride ? state.elementFlowRate[element] : state.flowRate;
       auto const& geometry=elements[element];
       auto const& nodes=geometry.Nodes();
       auto deformation=Eye<3,V>();
@@ -1452,7 +1456,7 @@ void mochi::soft::UpdatePlasticity(
       BatchReal3x3<1> inverse,candidate;
       for(int row=0;row<3;++row) for(int column=0;column<3;++column)
         inverse[row][column]=V{state.inverseDeformation[element][row][column]};
-      if(!fem::PlasticDeformationCandidate(deformation,inverse,state.yieldStrain,state.flowRate,
+      if(!fem::PlasticDeformationCandidate(deformation,inverse,yieldStrain,flowRate,
           static_cast<real>(time->DeltaTime()),candidate)) continue;
       NdArray<int,1> indices{element};
       BatchDouble<1> before,after;

@@ -30,7 +30,7 @@ using namespace mochi;
 
 // Call once on startup
 namespace mochi::shell {
-void InitializeOnce(entt::registry& reg) { ecs::RegisterComponent<CShellPlasticity>(reg); }
+void InitializeOnce(entt::registry& reg) { ecs::RegisterComponent<CShellPlasticity>(reg); ecs::RegisterComponent<CShellThickness>(reg); }
 
 real GetActorMass(entt::registry const& reg, entt::entity actor) {
   MOCHI_ASSERT(reg.all_of<TagShellActor>(actor), "Expected shell actor.");
@@ -181,6 +181,7 @@ void mochi::shell::AssembleBody(
     CFemSurfaceDiscretizationP1Q1 const& femSurfDisc,
     CRootTransform const& rootTransform,
     CShellMaterialParams const& materialParams,
+    CShellThickness const& thickness,
     CTimeIntegratorState const& intState,
     CDisplacementSlice<real, TimeStep::Current> const& currDispl,
     CDisplacementSlice<real, TimeStep::StageStart> const& stageStartDispl,
@@ -240,7 +241,7 @@ void mochi::shell::AssembleBody(
         stageStartDispl.value.GetConstSpan(),
         intState.dtStage,
         massDampingScale,
-        stiffnessDampingFactor, plasticity && plasticity->enabled ? plasticity : nullptr);
+        stiffnessDampingFactor, plasticity && plasticity->enabled ? plasticity : nullptr, thickness.ratios);
 
     AssembleObjResDRes<ShellStencilElement>(
         l2g,
@@ -376,13 +377,16 @@ void mochi::shell::EntityPostLastStage(
     fem::ExtrapolateStencilPositions<1>(stencil, currentPositions);
     auto const referenceCurvature = fem::SecondFundamentalForm<1>(fem::EdgeVectors<1>(referencePositions));
     auto const currentCurvature = fem::SecondFundamentalForm<1>(fem::EdgeVectors<1>(currentPositions));
+    bool const hasOverride = plasticity->useRegionOverrides && plasticity->elementYield[element] >= 0_r;
+    real const yieldCurvature = hasOverride ? plasticity->elementYield[element] : plasticity->yieldCurvature;
+    real const flowRate = hasOverride ? plasticity->elementFlowRate[element] : plasticity->flowRate;
     BatchReal2x2<1> plasticCurvature;
     for (int row = 0; row < 2; ++row)
       for (int column = 0; column < 2; ++column)
         plasticCurvature[row][column] = V{plasticity->curvature[element][row][column]};
     if (!fem::UpdatePlasticCurvature(fem::Metric<1>(referencePositions),
-        currentCurvature - referenceCurvature, plasticity->yieldCurvature,
-        plasticity->flowRate, static_cast<real>(sceneTime->DeltaTime()), plasticCurvature)) continue;
+        currentCurvature - referenceCurvature, yieldCurvature,
+        flowRate, static_cast<real>(sceneTime->DeltaTime()), plasticCurvature)) continue;
     for (int row = 0; row < 2; ++row)
       for (int column = 0; column < 2; ++column)
         plasticity->curvature[element][row][column] = plasticCurvature[row][column][0];

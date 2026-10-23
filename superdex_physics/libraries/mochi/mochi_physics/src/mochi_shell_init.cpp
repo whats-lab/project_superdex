@@ -204,6 +204,7 @@ void mochi::InitShellActor(
   shell::SetMaterialParams(params.material, material);
   // A stable, empty component keeps snapshot entity sets unchanged across runtime ON/OFF.
   reg.emplace<CShellPlasticity>(e);
+  reg.emplace<CShellThickness>(e);
 
   if (params.hasGravity) {
     reg.emplace<TagUseGravity>(e);

@@ -82,7 +82,8 @@ template <typename TriElementT>
     real dtStage,
     real massDampingScale,
     real stiffnessDampingFactor,
-    CShellPlasticity const* plasticity = nullptr) {
+    CShellPlasticity const* plasticity = nullptr,
+    Span<real const> thicknessRatios = {}) {
   static_assert(TriElementT::kSpaceDim == ShellTriangleElement::kSpaceDim);
   static_assert(TriElementT::kNumDofs == ShellTriangleElement::kNumDofs);
   MOCHI_ASSERT_VERBOSE(!triElements.empty(), "Empty shell discretization.");
@@ -209,6 +210,12 @@ template <typename TriElementT>
         }
       }
     }
+    BatchReal<kBatchSize> thicknessRatio{1_r};
+    if(!thicknessRatios.empty()) {
+      alignas(alignof(BatchReal<kBatchSize>)) real ratios[kBatchSize];
+      for(int lane=0;lane<kBatchSize;++lane) ratios[lane]=thicknessRatios[elemIndices[lane]];
+      thicknessRatio=Load<BatchReal<kBatchSize>>(ratios);
+    }
     out |= fem::ShellWork<kBatchSize>(
         stencilGlobalNodes,
         meshNodes,
@@ -224,7 +231,7 @@ template <typename TriElementT>
         projectPsd,
         stiffnessDampingFactor,
         hasStiffnessDamping ? &stageStartDispBatch : nullptr,
-        plasticity ? &plasticCurvature : nullptr);
+        plasticity ? &plasticCurvature : nullptr, thicknessRatio);
 
     // --- Inertia and mass-damping dresidual on the 3-node triangle sub-stencil ---
     if (outDRes) {
@@ -247,6 +254,7 @@ void AssembleBody(
     CFemSurfaceDiscretizationP1Q1 const& femSurfDisc,
     CRootTransform const& rootTransform,
     CShellMaterialParams const& materialParams,
+    CShellThickness const& thickness,
     CTimeIntegratorState const& intState,
     CDisplacementSlice<real, TimeStep::Current> const& currDispl,
     CDisplacementSlice<real, TimeStep::StageStart> const& stageStartDispl,

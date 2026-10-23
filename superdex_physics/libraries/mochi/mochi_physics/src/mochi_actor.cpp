@@ -3649,6 +3649,58 @@ void mochi::experimental::SetSoftPlasticity(Actor* actor,bool enabled,real yield
   }
   state->yieldStrain=yieldStrain;state->flowRate=flowRate;state->enabled=true;
 }
+/// <summary>Overrides a solid or Shell element's plastic flow when its rest centroid lies inside a box.</summary>
+void mochi::experimental::SetPlasticityRegions(Actor* actor,bool useRegionOverrides,Span<real const> regions,Error& error) {
+  MOCHI_ERROR_IF(!actor||(actor->GetType()!=ActorType::Soft&&actor->GetType()!=ActorType::Shell),error,"Soft or Shell actor required for plasticity regions.");MOCHI_ERROR_RETURN(error);
+  MOCHI_ERROR_IF(regions.size()%14!=0,error,"Plasticity regions require fourteen scalar values per box.");MOCHI_ERROR_RETURN(error);
+  // Reject a complete invalid update before changing any scene-owned material state.
+  for(int index=0;index<isize(regions);++index) {
+    MOCHI_ERROR_IF(!IsFinite(regions[index]),error,"Plasticity region values must be finite.");MOCHI_ERROR_RETURN(error);
+  }
+  for(int offset=0;offset<isize(regions);offset+=14) {
+    MOCHI_ERROR_IF(regions[offset+12]<0_r||regions[offset+13]<=0_r,error,"Invalid region yield or flow rate.");MOCHI_ERROR_RETURN(error);
+  }
+  auto* implementation=assert_cast<ActorInterfaceImpl*>(actor);
+  auto assign=[&](auto& state,int count,auto centerAt) {
+    state.useRegionOverrides=useRegionOverrides;
+    if(!useRegionOverrides) {state.elementYield.clear();state.elementFlowRate.clear();return;}
+    state.elementYield.assign(count,-1_r);state.elementFlowRate.assign(count,0_r);
+    for(int element=0;element<count;++element) {
+      Real3 const center=centerAt(element);
+      for(int offset=0;offset<isize(regions);offset+=14) {
+        bool inside=true;
+        for(int axis=0;axis<3;++axis) {
+          int const row=offset+axis*4;
+          real const position=regions[row]*center[0]+regions[row+1]*center[1]+regions[row+2]*center[2]+regions[row+3];
+          if(std::abs(position)>1_r) {inside=false;break;}
+        }
+        // Complete overrides follow hierarchy order, including a later higher yield value.
+        if(inside) {state.elementYield[element]=regions[offset+12];state.elementFlowRate[element]=regions[offset+13];}
+      }
+    }
+  };
+  if(actor->GetType()==ActorType::Soft) {
+    auto& state=implementation->reg.get<CSoftPlasticity>(implementation->e);
+    auto const& elements=implementation->reg.get<CFemVolumeDiscretizationP1Q1>(implementation->e).femElements;
+    auto const coordinates=implementation->reg.get<CTetrahedralMesh>(implementation->e).mesh->GetNodeCoordinates();
+    assign(state,isize(elements),[&](int element) {auto const& nodes=elements[element].Nodes();return (coordinates[nodes[0]]+coordinates[nodes[1]]+coordinates[nodes[2]]+coordinates[nodes[3]])*0.25_r;});
+  } else {
+    auto& state=implementation->reg.get<CShellPlasticity>(implementation->e);
+    auto const& map=implementation->reg.get<CLocal2GlobalMap>(implementation->e);
+    auto const coordinates=implementation->reg.get<CTriangularMesh>(implementation->e).mesh->GetNodeCoordinates();
+    assign(state,map.GetNumElements(),[&](int element) {auto const nodes=fem::GlobalStencilIndices(map.GetGlobalIndices(element),map.GetStencilIndices(element));return (coordinates[nodes[0]]+coordinates[nodes[1]]+coordinates[nodes[2]])/3_r;});
+  }
+}
+/// <summary>Sets physical thickness ratios for Shell membrane and bending stiffness without modifying its rest mesh.</summary>
+void mochi::experimental::SetShellThicknessRatios(Actor* actor,Span<real const> ratios,Error& error) {
+  MOCHI_ERROR_IF(!actor||actor->GetType()!=ActorType::Shell,error,"Shell actor required.");MOCHI_ERROR_RETURN(error);
+  auto* implementation=assert_cast<ActorInterfaceImpl*>(actor);
+  int const count=implementation->reg.get<CLocal2GlobalMap>(implementation->e).GetNumElements();
+  MOCHI_ERROR_IF(!ratios.empty()&&isize(ratios)!=count,error,"Shell thickness ratio count must match triangles.");MOCHI_ERROR_RETURN(error);
+  for(int index=0;index<isize(ratios);++index) {MOCHI_ERROR_IF(!IsFinite(ratios[index])||ratios[index]<=0_r,error,"Shell thickness ratios must be finite and positive.");MOCHI_ERROR_RETURN(error);}
+  auto& stored=implementation->reg.get<CShellThickness>(implementation->e).ratios;
+  stored.assign(ratios.begin(),ratios.end());
+}
 /// <summary>Enables node-stencil axial, bending and twist reference offsets for a rod.</summary>
 void mochi::experimental::SetRodPlasticity(Actor* actor,bool enabled,real yieldStrain,real yieldCurvature,real yieldTwist,real flowRate,Error& error) {
   MOCHI_ERROR_IF(!actor||actor->GetType()!=ActorType::Rod,error,"Rod actor required.");MOCHI_ERROR_RETURN(error);

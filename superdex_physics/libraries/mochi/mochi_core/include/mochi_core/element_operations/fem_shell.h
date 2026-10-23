@@ -834,6 +834,7 @@ bool ShellWork(
     bool projectPsd,
     real stiffnessDampingFactor = 0_r,
     NdArray<BatchReal<kBatchSize>, kBendingStencilDofs> const* stageStartDisp = nullptr,
-    BatchReal2x2<kBatchSize> const* plasticCurvature = nullptr);
+    BatchReal2x2<kBatchSize> const* plasticCurvature = nullptr,
+    BatchReal<kBatchSize> thicknessRatio = BatchReal<kBatchSize>{1_r});
 
 } // namespace mochi::fem

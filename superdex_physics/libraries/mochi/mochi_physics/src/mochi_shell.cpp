@@ -338,6 +338,23 @@ void mochi::shell::EntityPostStage(
   intVels.stages[intState.currentStage].value = currVel.value;
 }
 
+namespace {
+/// <summary>Isolates one hinge's contribution to the existing discrete Shell curvature tensor.</summary>
+BatchReal2x2<1> CreaseCurvature(NdArray<BatchReal<1>, fem::kBendingStencilDofs> const& positions,int edge) {
+  using V=BatchReal<1>;
+  auto const vectors=fem::EdgeVectors<1>(positions);
+  auto const normal=Normalize(Cross(vectors[2],vectors[0]));
+  auto const neighbor=Normalize(Cross(vectors[edge+3],vectors[(edge+1)%3]));
+  // Other neighbors use the central face normal, whose tangential dot products vanish.
+  auto const difference=fem::BatchKelvinInversion<1>(V{0.5_r}*(normal+neighbor))-normal;
+  V const alongFirst=V{2_r}*Dot(difference,vectors[0]);
+  V const alongThird=V{2_r}*Dot(difference,vectors[2]);
+  if(edge==0)return SymMatrix2x2(-alongFirst,alongThird,alongThird);
+  if(edge==1)return SymMatrix2x2(alongFirst,V{0_r},V{0_r});
+  return SymMatrix2x2(V{0_r},V{0_r},-alongThird);
+}
+} // namespace
+
 void mochi::shell::EntityPostLastStage(
     ecs::Included<TagShellActor>,
     CTimeIntegratorState const& intState,
@@ -375,6 +392,29 @@ void mochi::shell::EntityPostLastStage(
     }
     fem::ExtrapolateStencilPositions<1>(stencil, referencePositions);
     fem::ExtrapolateStencilPositions<1>(stencil, currentPositions);
+    if(plasticity->regionsOnly) {
+      auto const metric=fem::Metric<1>(referencePositions);
+      // Independent edge histories keep unselected panel diagonals entirely elastic.
+      for(int edge=0;edge<3;++edge) {
+        int const edgeIndex=element*3+edge;
+        if(nodes[edge+3]==kSentinelIndex||plasticity->elementYield[edgeIndex]<0_r)continue;
+        BatchReal2x2<1> edgeCurvature;
+        for(int row=0;row<2;++row)
+          for(int column=0;column<2;++column)edgeCurvature[row][column]=V{plasticity->edgeCurvature[edgeIndex][row][column]};
+        if(!fem::UpdatePlasticCurvature(metric,CreaseCurvature(currentPositions,edge)-CreaseCurvature(referencePositions,edge),
+            plasticity->elementYield[edgeIndex],plasticity->elementFlowRate[edgeIndex],
+            static_cast<real>(sceneTime->DeltaTime()),edgeCurvature))continue;
+        for(int row=0;row<2;++row)
+          for(int column=0;column<2;++column)plasticity->edgeCurvature[edgeIndex][row][column]=edgeCurvature[row][column][0];
+      }
+      for(int row=0;row<2;++row)
+        for(int column=0;column<2;++column) {
+          real accumulated=0_r;
+          for(int edge=0;edge<3;++edge)accumulated+=plasticity->edgeCurvature[element*3+edge][row][column];
+          plasticity->curvature[element][row][column]=accumulated;
+        }
+      continue;
+    }
     auto const referenceCurvature = fem::SecondFundamentalForm<1>(fem::EdgeVectors<1>(referencePositions));
     auto const currentCurvature = fem::SecondFundamentalForm<1>(fem::EdgeVectors<1>(currentPositions));
     bool const hasOverride = plasticity->useRegionOverrides && plasticity->elementYield[element] >= 0_r;

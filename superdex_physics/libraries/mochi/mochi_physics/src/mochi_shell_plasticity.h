@@ -10,18 +10,22 @@ struct CShellPlasticity : NoCopy {
   real yieldCurvature = 8_r;
   real flowRate = 30_r;
   bool useRegionOverrides = false;
+  bool regionsOnly = false;
   std::vector<real> elementYield;
   std::vector<real> elementFlowRate;
   std::vector<NdArray<real, 2, 2>> curvature;
+  std::vector<NdArray<real, 2, 2>> edgeCurvature;
   MOCHI_STRUCT_BEGIN(mochi::CShellPlasticity)
   MOCHI_ATTRIBUTE(CaptureState)
   MOCHI_FIELD(enabled)
   MOCHI_FIELD(yieldCurvature)
   MOCHI_FIELD(flowRate)
   MOCHI_FIELD(useRegionOverrides)
+  MOCHI_FIELD(regionsOnly)
   MOCHI_FIELD(elementYield)
   MOCHI_FIELD(elementFlowRate)
   MOCHI_FIELD(curvature)
+  MOCHI_FIELD(edgeCurvature)
   MOCHI_STRUCT_END()
 
 };

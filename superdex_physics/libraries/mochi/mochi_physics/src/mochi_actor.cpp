@@ -1943,6 +1943,9 @@ class ActorInterfaceImpl : public ActorInterface {
 
     // A reset returns the material as well as the coordinates to the authored state.
     if (auto* plasticity = reg.try_get<CShellPlasticity>(e)) {
+      for (auto& curvature : plasticity->edgeCurvature)
+        for (int row = 0; row < 2; ++row)
+          for (int column = 0; column < 2; ++column) curvature[row][column] = 0_r;
       for (auto& curvature : plasticity->curvature)
         for (int row = 0; row < 2; ++row)
           for (int column = 0; column < 2; ++column) curvature[row][column] = 0_r;
@@ -3587,12 +3590,16 @@ void mochi::experimental::SetShellPlasticity(Actor* actor, bool enabled,
   auto const entity = implementation->e;
   auto& state = registry.get<CShellPlasticity>(entity);
   // OFF selects the original assembly, clears history and preserves the snapshot component set.
-  if (!enabled) { state.enabled = false; state.curvature.clear(); return; }
+  if (!enabled) { state.enabled = false; state.curvature.clear(); state.edgeCurvature.clear(); return; }
   MOCHI_ERROR_IF(!IsFinite(yieldCurvature) || yieldCurvature < 0_r ||
       !IsFinite(flowRate) || flowRate <= 0_r, error, "Invalid Shell plasticity parameters.");
   MOCHI_ERROR_RETURN(error);
   if (!state.enabled) {
     state.curvature.resize(registry.get<CLocal2GlobalMap>(entity).GetNumElements());
+    if(state.regionsOnly)state.edgeCurvature.resize(state.curvature.size()*3);
+    for(auto& curvature:state.edgeCurvature)
+      for(int row=0;row<2;++row)
+        for(int column=0;column<2;++column)curvature[row][column]=0_r;
     for (auto& curvature : state.curvature)
       for (int row = 0; row < 2; ++row)
         for (int column = 0; column < 2; ++column) curvature[row][column] = 0_r;
@@ -3649,9 +3656,11 @@ void mochi::experimental::SetSoftPlasticity(Actor* actor,bool enabled,real yield
   }
   state->yieldStrain=yieldStrain;state->flowRate=flowRate;state->enabled=true;
 }
-/// <summary>Overrides a solid or Shell element's plastic flow when its rest centroid lies inside a box.</summary>
-void mochi::experimental::SetPlasticityRegions(Actor* actor,bool useRegionOverrides,Span<real const> regions,Error& error) {
+/// <summary>Overrides rest-space element centers or selects individual Shell crease midpoints.</summary>
+void mochi::experimental::SetPlasticityRegions(Actor* actor,int regionMode,Span<real const> regions,Error& error) {
   MOCHI_ERROR_IF(!actor||(actor->GetType()!=ActorType::Soft&&actor->GetType()!=ActorType::Shell),error,"Soft or Shell actor required for plasticity regions.");MOCHI_ERROR_RETURN(error);
+  MOCHI_ERROR_IF(regionMode<0||regionMode>2||(regionMode==2&&actor->GetType()!=ActorType::Shell),error,"Invalid plasticity region mode.");MOCHI_ERROR_RETURN(error);
+  bool const useRegionOverrides=regionMode!=0;
   MOCHI_ERROR_IF(regions.size()%14!=0,error,"Plasticity regions require fourteen scalar values per box.");MOCHI_ERROR_RETURN(error);
   // Reject a complete invalid update before changing any scene-owned material state.
   for(int index=0;index<isize(regions);++index) {
@@ -3688,7 +3697,29 @@ void mochi::experimental::SetPlasticityRegions(Actor* actor,bool useRegionOverri
     auto& state=implementation->reg.get<CShellPlasticity>(implementation->e);
     auto const& map=implementation->reg.get<CLocal2GlobalMap>(implementation->e);
     auto const coordinates=implementation->reg.get<CTriangularMesh>(implementation->e).mesh->GetNodeCoordinates();
-    assign(state,map.GetNumElements(),[&](int element) {auto const nodes=fem::GlobalStencilIndices(map.GetGlobalIndices(element),map.GetStencilIndices(element));return (coordinates[nodes[0]]+coordinates[nodes[1]]+coordinates[nodes[2]])/3_r;});
+    // Edge-only history separates each crease from the diagonal inside the same coarse panel.
+    bool const regionsOnly=regionMode==2;
+    if(state.regionsOnly!=regionsOnly) {
+      state.regionsOnly=regionsOnly;
+      state.edgeCurvature.clear();
+      for(auto& curvature:state.curvature)
+        for(int row=0;row<2;++row)
+          for(int column=0;column<2;++column)curvature[row][column]=0_r;
+    }
+    if(regionsOnly) {
+      int const previousCount=isize(state.edgeCurvature);
+      state.edgeCurvature.resize(map.GetNumElements()*3);
+      for(int index=previousCount;index<isize(state.edgeCurvature);++index)
+        for(int row=0;row<2;++row)
+          for(int column=0;column<2;++column)state.edgeCurvature[index][row][column]=0_r;
+      assign(state,map.GetNumElements()*3,[&](int edgeIndex) {
+        int const element=edgeIndex/3,edge=edgeIndex%3;
+        auto const nodes=fem::GlobalStencilIndices(map.GetGlobalIndices(element),map.GetStencilIndices(element));
+        return (coordinates[nodes[edge]]+coordinates[nodes[(edge+1)%3]])*0.5_r;
+      });
+    } else {
+      assign(state,map.GetNumElements(),[&](int element) {auto const nodes=fem::GlobalStencilIndices(map.GetGlobalIndices(element),map.GetStencilIndices(element));return (coordinates[nodes[0]]+coordinates[nodes[1]]+coordinates[nodes[2]])/3_r;});
+    }
   }
 }
 /// <summary>Sets physical thickness ratios for Shell membrane and bending stiffness without modifying its rest mesh.</summary>

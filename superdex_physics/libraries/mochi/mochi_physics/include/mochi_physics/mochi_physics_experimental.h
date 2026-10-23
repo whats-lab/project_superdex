@@ -958,7 +958,7 @@ MOCHI_API real GetShellPlasticCurvature(Actor const* actor, Error& error);
 /// <summary>Sets solid material plasticity, including nested soft parts, without changing authored geometry.</summary>
 MOCHI_API void SetSoftPlasticity(Actor* actor, bool enabled, real yieldStrain, real flowRate, Error& error);
 /// <summary>Maps rest-element centroids into normalized boxes: three affine rows followed by yield strain and flow rate.</summary>
-MOCHI_API void SetPlasticityRegions(Actor* actor, bool useRegionOverrides, Span<real const> regions, Error& error);
+MOCHI_API void SetPlasticityRegions(Actor* actor, int regionMode, Span<real const> regions, Error& error);
 /// <summary>Scales each Shell triangle's membrane stiffness by thickness and bending stiffness by thickness cubed.</summary>
 MOCHI_API void SetShellThicknessRatios(Actor* actor, Span<real const> ratios, Error& error);
 /// <summary>Sets axial, bending and torsional yield for a rod actor.</summary>

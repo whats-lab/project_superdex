@@ -2545,6 +2545,7 @@ static void ValidateBlendedVertexConsistency(
   MOCHI_ERROR_RETURN(error);
 
   auto const targetCoordinates = targetMesh->GetNodeCoordinates();
+  DynamicArray<int> contactNodeOwners(targetCoordinates.size(), -1);
   for (int softIndex = 0; softIndex < isize(softShapes); ++softIndex) {
     auto const& softName = softParams[softIndex].name;
     auto const blendingIt = blending->perSourceShapeData.find(softName);
@@ -2564,6 +2565,16 @@ static void ValidateBlendedVertexConsistency(
       if (sourceBlending.weights[targetVertex] == 0_r) {
         continue;
       }
+
+      // Contact partitioning supports one nested soft owner per triangle, so reject overlap
+      // before actor creation rather than reaching its assertion after scene mutation.
+      MOCHI_ERROR_IF(
+          contactNodeOwners[targetVertex] != -1 &&
+              contactNodeOwners[targetVertex] != softIndex,
+          error,
+          "A blended contact element cannot be governed by more than one soft actor.");
+      MOCHI_ERROR_RETURN(error);
+      contactNodeOwners[targetVertex] = softIndex;
 
       int const sourceVertex = sourceBlending.indices[targetVertex];
       MOCHI_ERROR_IF(
@@ -2598,6 +2609,23 @@ static void ValidateBlendedVertexConsistency(
             "Nested soft actor has blended vertices with different ordered skinning weights");
         MOCHI_ERROR_RETURN(error);
       }
+    }
+  }
+
+  auto const connectivity = targetMesh->GetFlatConnectivity();
+  for (int elementIndex = 0; elementIndex < targetMesh->GetNumElements(); ++elementIndex) {
+    int ownerIndex = -1;
+    for (int cornerIndex = 0; cornerIndex < 3; ++cornerIndex) {
+      int const nodeOwner = contactNodeOwners[connectivity[3 * elementIndex + cornerIndex]];
+      if (nodeOwner == -1) {
+        continue;
+      }
+      MOCHI_ERROR_IF(
+          ownerIndex != -1 && ownerIndex != nodeOwner,
+          error,
+          "A blended contact element cannot be governed by more than one soft actor.");
+      MOCHI_ERROR_RETURN(error);
+      ownerIndex = nodeOwner;
     }
   }
 }
